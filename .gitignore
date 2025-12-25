@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.code-workspace
+
+# Data
+data/
+*.json
+!package.json
+
+# Logs
+*.log
+logs/
+
+# Screenshots
+debug/
+screenshots/
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Build
+dist/
+build/
+*.spec
+
+# Temp files (Chinese named)
+会话记录总阶.md
+关于一些逻辑需要完善.md
+日志.md

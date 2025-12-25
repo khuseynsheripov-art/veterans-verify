@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Veterans Verify - 控制台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</head>
+<body class="bg-gray-900 min-h-screen">
+{% raw %}
+    <div id="app" class="container mx-auto px-4 py-8">
+        <!-- 头部 -->
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-white">Veterans Verify</h1>
+            <div class="flex items-center gap-4">
+                <span :class="systemStatus === 'running' ? 'text-green-400' : 'text-yellow-400'" class="text-sm">
+                    {{ systemStatus === 'running' ? '运行中' : '已暂停' }}
+                </span>
+                <a href="/logout" class="text-gray-400 hover:text-white text-sm">退出</a>
+            </div>
+        </div>
+
+        <!-- 统计卡片 -->
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-gray-400 text-sm">总数</div>
+                <div class="text-2xl font-bold text-white">{{ stats.total || 0 }}</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-gray-400 text-sm">进行中</div>
+                <div class="text-2xl font-bold text-blue-400">{{ stats.pending || 0 }}</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-gray-400 text-sm">成功</div>
+                <div class="text-2xl font-bold text-green-400">{{ stats.success || 0 }}</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-gray-400 text-sm">失败</div>
+                <div class="text-2xl font-bold text-red-400">{{ stats.failed || 0 }}</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-gray-400 text-sm">队列</div>
+                <div class="text-2xl font-bold text-yellow-400">{{ queueSize }}</div>
+            </div>
+        </div>
+
+        <!-- 控制面板 -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold text-white mb-4">批量创建账号</h2>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <div>
+                    <label class="block text-gray-400 text-sm mb-1">数量</label>
+                    <input v-model.number="createCount" type="number" min="1" max="100"
+                        class="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-gray-400 text-sm mb-1">间隔（秒）</label>
+                    <input v-model.number="createInterval" type="number" min="0" max="60"
+                        class="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 focus:outline-none">
+                </div>
+                <div class="flex items-end">
+                    <button @click="createAccounts" :disabled="creating"
+                        class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-6 py-2 rounded font-semibold transition w-full">
+                        {{ creating ? '创建中...' : '开始创建' }}
+                    </button>
+                </div>
+                <div class="flex items-end">
+                    <button @click="stopAll"
+                        class="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded font-semibold transition w-full">
+                        停止全部
+                    </button>
+                </div>
+            </div>
+            <div class="text-gray-400 text-sm">
+                军人数据库: {{ vetStats.total || 0 }} 条记录 (可用: {{ vetStats.available || 0 }})
+            </div>
+        </div>
+
+        <!-- 账号列表 -->
+        <div class="bg-gray-800 rounded-lg p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold text-white">账号列表</h2>
+                <div class="flex gap-2">
+                    <select v-model="statusFilter" @change="fetchAccounts"
+                        class="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 text-sm">
+                        <option value="">全部</option>
+                        <option value="success">成功</option>
+                        <option value="failed">失败</option>
+                        <option value="pending">进行中</option>
+                    </select>
+                    <button @click="exportAccounts"
+                        class="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded text-sm">
+                        导出
+                    </button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left">
+                    <thead>
+                        <tr class="text-gray-400 text-sm border-b border-gray-700">
+                            <th class="pb-3">邮箱</th>
+                            <th class="pb-3">姓名</th>
+                            <th class="pb-3">军种</th>
+                            <th class="pb-3">状态</th>
+                            <th class="pb-3">错误信息</th>
+                            <th class="pb-3">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="acc in accounts" :key="acc.email" class="border-b border-gray-700 text-gray-300">
+                            <td class="py-3 text-sm font-mono">{{ acc.email }}</td>
+                            <td class="py-3">{{ acc.first_name }} {{ acc.last_name }}</td>
+                            <td class="py-3 text-sm">{{ acc.branch }}</td>
+                            <td class="py-3">
+                                <span :class="getStatusClass(acc.status)" class="px-2 py-1 rounded text-xs font-semibold">
+                                    {{ getStatusText(acc.status) }}
+                                </span>
+                            </td>
+                            <td class="py-3 text-sm text-red-400 max-w-xs truncate" :title="acc.error_message">
+                                {{ acc.error_message || '-' }}
+                            </td>
+                            <td class="py-3">
+                                <button v-if="acc.status === 'failed'" @click="retryAccount(acc.email)"
+                                    class="text-blue-400 hover:text-blue-300 text-sm mr-2">重试</button>
+                                <button @click="deleteAccount(acc.email)"
+                                    class="text-red-400 hover:text-red-300 text-sm">删除</button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div v-if="accounts.length === 0" class="text-center py-8 text-gray-500">
+                    暂无账号
+                </div>
+            </div>
+            <!-- 分页 -->
+            <div v-if="totalPages > 1" class="flex justify-center gap-2 mt-4">
+                <button @click="page = Math.max(1, page - 1); fetchAccounts()"
+                    :disabled="page <= 1"
+                    class="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white px-3 py-1 rounded text-sm">
+                    上一页
+                </button>
+                <span class="text-gray-400 py-1">{{ page }} / {{ totalPages }}</span>
+                <button @click="page = Math.min(totalPages, page + 1); fetchAccounts()"
+                    :disabled="page >= totalPages"
+                    class="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white px-3 py-1 rounded text-sm">
+                    下一页
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    const { createApp, ref, onMounted } = Vue;
+
+    createApp({
+        setup() {
+            const systemStatus = ref('running');
+            const stats = ref({});
+            const vetStats = ref({});
+            const queueSize = ref(0);
+            const accounts = ref([]);
+            const createCount = ref(1);
+            const createInterval = ref(0);
+            const creating = ref(false);
+            const statusFilter = ref('');
+            const page = ref(1);
+            const totalPages = ref(1);
+
+            const statusTextMap = {
+                'pending': '等待中',
+                'creating_email': '创建邮箱',
+                'registering': '注册中',
+                'waiting_code': '等待验证码',
+                'chatgpt_ready': 'ChatGPT就绪',
+                'opening_sheerid': '打开验证页',
+                'filling_form': '填写表单',
+                'waiting_link': '等待链接',
+                'clicking_link': '点击链接',
+                'success': '成功',
+                'failed': '失败'
+            };
+
+            const getStatusText = (status) => statusTextMap[status] || status;
+
+            const fetchStatus = async () => {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    if (data.success) {
+                        stats.value = data.accounts || {};
+                        queueSize.value = data.queue_size || 0;
+                    }
+                } catch (e) {
+                    console.error('获取状态失败:', e);
+                }
+            };
+
+            const fetchVetStats = async () => {
+                try {
+                    const res = await fetch('/api/veteran-data/stats');
+                    const data = await res.json();
+                    if (data.success) {
+                        vetStats.value = data.stats || {};
+                    }
+                } catch (e) {
+                    console.error('获取军人数据统计失败:', e);
+                }
+            };
+
+            const fetchAccounts = async () => {
+                try {
+                    const params = new URLSearchParams({
+                        page: page.value,
+                        per_page: 20
+                    });
+                    if (statusFilter.value) params.set('status', statusFilter.value);
+
+                    const res = await fetch(`/api/accounts?${params}`);
+                    const data = await res.json();
+                    if (data.success) {
+                        accounts.value = data.accounts || [];
+                        totalPages.value = data.total_pages || 1;
+                    }
+                } catch (e) {
+                    console.error('获取账号列表失败:', e);
+                }
+            };
+
+            const createAccounts = async () => {
+                creating.value = true;
+                try {
+                    const res = await fetch('/api/accounts', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            count: createCount.value,
+                            interval: createInterval.value
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        fetchAccounts();
+                        fetchStatus();
+                    } else {
+                        alert(data.error || '创建账号失败');
+                    }
+                } catch (e) {
+                    console.error('创建账号失败:', e);
+                    alert('创建账号失败');
+                } finally {
+                    creating.value = false;
+                }
+            };
+
+            const retryAccount = async (email) => {
+                try {
+                    await fetch(`/api/accounts/${encodeURIComponent(email)}/retry`, { method: 'POST' });
+                    fetchAccounts();
+                    fetchStatus();
+                } catch (e) {
+                    console.error('重试失败:', e);
+                }
+            };
+
+            const deleteAccount = async (email) => {
+                if (!confirm('确定删除这个账号吗？')) return;
+                try {
+                    await fetch(`/api/accounts/${encodeURIComponent(email)}`, { method: 'DELETE' });
+                    fetchAccounts();
+                    fetchStatus();
+                } catch (e) {
+                    console.error('删除失败:', e);
+                }
+            };
+
+            const stopAll = async () => {
+                if (!confirm('确定停止所有任务吗？')) return;
+                try {
+                    await fetch('/api/accounts/stop-all', { method: 'POST' });
+                    fetchAccounts();
+                    fetchStatus();
+                } catch (e) {
+                    console.error('停止失败:', e);
+                }
+            };
+
+            const exportAccounts = async () => {
+                try {
+                    const res = await fetch('/api/accounts/export');
+                    const data = await res.json();
+                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `veterans-accounts-${new Date().toISOString().slice(0,10)}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    console.error('导出失败:', e);
+                }
+            };
+
+            const getStatusClass = (status) => {
+                const classes = {
+                    'pending': 'bg-gray-600',
+                    'creating_email': 'bg-blue-600',
+                    'registering': 'bg-blue-600',
+                    'waiting_code': 'bg-yellow-600',
+                    'chatgpt_ready': 'bg-blue-600',
+                    'filling_form': 'bg-blue-600',
+                    'waiting_link': 'bg-yellow-600',
+                    'success': 'bg-green-600',
+                    'failed': 'bg-red-600'
+                };
+                return classes[status] || 'bg-gray-600';
+            };
+
+            onMounted(() => {
+                fetchStatus();
+                fetchVetStats();
+                fetchAccounts();
+                setInterval(fetchStatus, 5000);
+                setInterval(fetchAccounts, 5000);
+            });
+
+            return {
+                systemStatus,
+                stats,
+                vetStats,
+                queueSize,
+                accounts,
+                createCount,
+                createInterval,
+                creating,
+                statusFilter,
+                page,
+                totalPages,
+                fetchAccounts,
+                createAccounts,
+                retryAccount,
+                deleteAccount,
+                stopAll,
+                exportAccounts,
+                getStatusClass,
+                getStatusText
+            };
+        }
+    }).mount('#app');
+    </script>
+{% endraw %}
+</body>
+</html>
