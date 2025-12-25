@@ -73,6 +73,8 @@ class AccountInfo:
         return {
             "account_id": self.account_id,
             "email": self.email,
+            "password": self.password,  # ChatGPT 密码
+            "jwt": self.jwt,            # 邮箱 JWT
             "first_name": self.first_name,
             "last_name": self.last_name,
             "branch": self.branch,

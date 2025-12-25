@@ -9,7 +9,8 @@ echo ========================================
 echo.
 
 set "PORT=9222"
-set "USER_DATA_DIR=%USERPROFILE%\.cache\veterans-chrome-mcp\user-data"
+REM 使用默认 Chrome 配置（保留代理插件等）
+set "USER_DATA_DIR=%USERPROFILE%\AppData\Local\Google\Chrome\User Data"
 set "CHROME_EXE=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
 
 if not exist "%CHROME_EXE%" set "CHROME_EXE=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
