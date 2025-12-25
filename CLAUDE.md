@@ -9,8 +9,10 @@
 | 项目 | 值 |
 |------|-----|
 | **GitHub 仓库** | https://github.com/khuseynsheripov-art/veterans-verify.git |
+| **Veterans 验证入口** | https://chatgpt.com/veterans-claim |
 | **临时邮箱前端** | https://one.009025.xyz/ |
 | **本地服务端口** | 7870 |
+| **开发测试账号** | `data/dev_test_account.json` |
 
 ---
 
