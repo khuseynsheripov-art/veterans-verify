@@ -25,6 +25,7 @@ data/
 !data/dev_test_account.json
 *.json
 !package.json
+K-12项目.code-workspace
 
 # Logs
 *.log
@@ -49,3 +50,5 @@ build/
 关于一些逻辑需要完善.md
 日志.md
 **/备份.env
+上次会话记录.md
+CLAUDE.md

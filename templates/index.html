@@ -14,66 +14,306 @@
         <div class="flex justify-between items-center mb-8">
             <h1 class="text-3xl font-bold text-white">Veterans Verify</h1>
             <div class="flex items-center gap-4">
-                <span :class="systemStatus === 'running' ? 'text-green-400' : 'text-yellow-400'" class="text-sm">
-                    {{ systemStatus === 'running' ? '运行中' : '已暂停' }}
-                </span>
+                <span class="text-green-400 text-sm">运行中</span>
+                <button @click="restartService" class="text-yellow-400 hover:text-yellow-300 text-sm">重启服务</button>
                 <a href="/logout" class="text-gray-400 hover:text-white text-sm">退出</a>
             </div>
         </div>
 
         <!-- 统计卡片 -->
-        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-8">
             <div class="bg-gray-800 rounded-lg p-4">
-                <div class="text-gray-400 text-sm">总数</div>
-                <div class="text-2xl font-bold text-white">{{ stats.total || 0 }}</div>
+                <div class="text-gray-400 text-sm">军人数据</div>
+                <div class="text-2xl font-bold text-white">{{ vetStats.available || 0 }}</div>
+                <div class="text-xs text-gray-500">可用</div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4">
-                <div class="text-gray-400 text-sm">进行中</div>
-                <div class="text-2xl font-bold text-blue-400">{{ stats.pending || 0 }}</div>
+                <div class="text-gray-400 text-sm">邮箱池</div>
+                <div class="text-2xl font-bold text-blue-400">{{ emailPoolStats.available || 0 }}</div>
+                <div class="text-xs text-gray-500">可用</div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4">
-                <div class="text-gray-400 text-sm">成功</div>
-                <div class="text-2xl font-bold text-green-400">{{ stats.success || 0 }}</div>
+                <div class="text-gray-400 text-sm">账号</div>
+                <div class="text-2xl font-bold text-white">{{ accountStats.total || 0 }}</div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4">
-                <div class="text-gray-400 text-sm">失败</div>
-                <div class="text-2xl font-bold text-red-400">{{ stats.failed || 0 }}</div>
+                <div class="text-gray-400 text-sm">验证成功</div>
+                <div class="text-2xl font-bold text-green-400">{{ accountStats.verified || 0 }}</div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4">
-                <div class="text-gray-400 text-sm">队列</div>
-                <div class="text-2xl font-bold text-yellow-400">{{ queueSize }}</div>
+                <div class="text-gray-400 text-sm">验证失败</div>
+                <div class="text-2xl font-bold text-red-400">{{ accountStats.failed || 0 }}</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-gray-400 text-sm">待验证</div>
+                <div class="text-2xl font-bold text-yellow-400">{{ accountStats.pending || 0 }}</div>
             </div>
         </div>
 
-        <!-- 控制面板 -->
-        <div class="bg-gray-800 rounded-lg p-6 mb-8">
-            <h2 class="text-xl font-semibold text-white mb-4">批量创建账号</h2>
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-                <div>
-                    <label class="block text-gray-400 text-sm mb-1">数量</label>
-                    <input v-model.number="createCount" type="number" min="1" max="100"
-                        class="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 focus:outline-none">
+        <!-- 运行中任务面板 -->
+        <div v-if="runningTask" class="bg-yellow-900/50 border border-yellow-600 rounded-lg p-4 mb-8">
+            <div class="flex justify-between items-center mb-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-3 h-3 bg-yellow-400 rounded-full animate-pulse"></div>
+                    <span class="text-yellow-400 font-semibold">任务运行中</span>
+                    <span class="text-white text-sm">{{ runningTask.email }}</span>
+                    <span class="text-gray-400 text-xs">({{ runningTask.mode }})</span>
                 </div>
-                <div>
-                    <label class="block text-gray-400 text-sm mb-1">间隔（秒）</label>
-                    <input v-model.number="createInterval" type="number" min="0" max="60"
-                        class="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 focus:outline-none">
-                </div>
-                <div class="flex items-end">
-                    <button @click="createAccounts" :disabled="creating"
-                        class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-6 py-2 rounded font-semibold transition w-full">
-                        {{ creating ? '创建中...' : '开始创建' }}
+                <div class="flex gap-2">
+                    <button @click="logoutChatgpt"
+                        class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-1 rounded text-sm">
+                        退出登录
                     </button>
-                </div>
-                <div class="flex items-end">
-                    <button @click="stopAll"
-                        class="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded font-semibold transition w-full">
-                        停止全部
+                    <button @click="restartTask(runningTask.email)"
+                        class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-sm">
+                        重启
+                    </button>
+                    <button @click="stopTask(runningTask.email)"
+                        class="bg-red-600 hover:bg-red-700 text-white px-4 py-1 rounded text-sm">
+                        停止
                     </button>
                 </div>
             </div>
-            <div class="text-gray-400 text-sm">
-                军人数据库: {{ vetStats.total || 0 }} 条记录 (可用: {{ vetStats.available || 0 }})
+            <div class="bg-gray-900 rounded p-3 h-40 overflow-y-auto font-mono text-xs" ref="logContainer">
+                <div v-for="(log, idx) in runningTask.logs" :key="idx" class="text-gray-300">{{ log }}</div>
+                <div v-if="!runningTask.logs || runningTask.logs.length === 0" class="text-gray-500">等待日志...</div>
+            </div>
+        </div>
+
+        <!-- 模式选择 Tabs -->
+        <div class="bg-gray-800 rounded-lg mb-8">
+            <div class="flex border-b border-gray-700">
+                <button v-for="mode in modes" :key="mode.id"
+                    @click="currentMode = mode.id"
+                    :class="currentMode === mode.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-400 hover:text-white'"
+                    class="px-6 py-3 border-b-2 font-medium text-sm transition">
+                    {{ mode.name }}
+                </button>
+            </div>
+
+            <div class="p-6">
+                <!-- 模式1: 邮箱池管理 -->
+                <div v-if="currentMode === 'email_pool'">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <h3 class="text-white font-semibold mb-4">批量创建邮箱</h3>
+                            <div class="flex gap-2 mb-4">
+                                <input v-model.number="emailCreateCount" type="number" min="1" max="50"
+                                    class="w-24 bg-gray-700 text-white px-3 py-2 rounded" placeholder="数量">
+                                <button @click="createEmails" :disabled="creatingEmails"
+                                    class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-2 rounded">
+                                    {{ creatingEmails ? '创建中...' : '创建邮箱' }}
+                                </button>
+                            </div>
+                            <h3 class="text-white font-semibold mb-2">添加外部邮箱</h3>
+                            <div class="space-y-2">
+                                <input v-model="externalEmail" type="email" placeholder="邮箱地址"
+                                    class="w-full bg-gray-700 text-white px-3 py-2 rounded">
+                                <input v-model="externalJwt" type="text" placeholder="JWT Token"
+                                    class="w-full bg-gray-700 text-white px-3 py-2 rounded">
+                                <button @click="addExternalEmail"
+                                    class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">
+                                    添加
+                                </button>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="text-white font-semibold">邮箱列表 <span class="text-gray-400 text-sm">({{ visibleEmails.length }})</span></h3>
+                                <button @click="reloadEmailPool" class="text-blue-400 hover:text-blue-300 text-sm">刷新</button>
+                            </div>
+                            <div class="max-h-64 overflow-y-auto space-y-2">
+                                <div v-for="email in visibleEmails" :key="email.address"
+                                    class="bg-gray-700 rounded p-3 flex justify-between items-center">
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-white text-sm font-mono truncate">{{ email.address }}</div>
+                                        <div class="flex items-center gap-2 mt-1">
+                                            <span class="text-xs px-2 py-0.5 rounded"
+                                                :class="{
+                                                    'bg-green-600 text-green-100': email.status === 'available',
+                                                    'bg-blue-600 text-blue-100': email.status === 'in_use',
+                                                    'bg-green-700 text-green-100': email.status === 'verified',
+                                                    'bg-orange-600 text-orange-100': email.status === 'consumed',
+                                                    'bg-red-600 text-red-100': email.status === 'failed'
+                                                }">
+                                                {{ email.status }}
+                                            </span>
+                                            <!-- consumed 显示被谁消耗 -->
+                                            <span v-if="email.consumed_by" class="text-xs text-orange-400" :title="'被 ' + email.consumed_by + ' 消耗'">
+                                                → {{ email.consumed_by.substring(0, 18) }}...
+                                            </span>
+                                            <!-- verified 账号显示消耗的邮箱 -->
+                                            <span v-else-if="email.consumed_email" class="text-xs text-purple-400" :title="'消耗了 ' + email.consumed_email">
+                                                ← {{ email.consumed_email.substring(0, 18) }}...
+                                            </span>
+                                            <span v-else-if="email.linked_account" class="text-xs text-yellow-400" :title="'关联账号: ' + email.linked_account">
+                                                → {{ email.linked_account.substring(0, 15) }}...
+                                            </span>
+                                        </div>
+                                        <!-- 错误信息 -->
+                                        <div v-if="email.error_message" class="text-xs text-red-400 mt-1 truncate" :title="email.error_message">
+                                            {{ email.error_message }}
+                                        </div>
+                                        <!-- 成功军人信息 -->
+                                        <div v-if="email.verified_veteran" class="text-xs text-green-400 mt-1">
+                                            ✓ {{ email.verified_veteran.first_name }} {{ email.verified_veteran.last_name }} ({{ email.verified_veteran.branch }})
+                                        </div>
+                                    </div>
+                                    <button @click="deleteEmail(email.address)" class="text-red-400 hover:text-red-300 text-sm ml-2">删除</button>
+                                </div>
+                                <div v-if="visibleEmails.length === 0" class="text-gray-500 text-center py-4">暂无邮箱</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 模式2: 全自动（支持批量） -->
+                <div v-if="currentMode === 'full_auto'">
+                    <div class="bg-green-900/30 border border-green-600/50 rounded-lg p-3 mb-4">
+                        <div class="text-green-400 font-semibold">批量验证模式</div>
+                        <div class="text-gray-300 text-sm">从邮箱池依次验证，成功指定数量后自动暂停</div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-gray-400 text-sm mb-1">成功数量后暂停</label>
+                            <input v-model.number="batchSuccessCount" type="number" min="1" max="50"
+                                class="w-full bg-gray-700 text-white px-3 py-2 rounded" placeholder="1">
+                        </div>
+                        <div>
+                            <label class="block text-gray-400 text-sm mb-1">邮箱来源</label>
+                            <select v-model="autoEmailSource" class="w-full bg-gray-700 text-white px-3 py-2 rounded">
+                                <option value="pool">从邮箱池依次使用</option>
+                                <option value="create">自动创建新邮箱</option>
+                            </select>
+                        </div>
+                        <div class="flex items-end">
+                            <button @click="startFullAuto" :disabled="fullAutoRunning"
+                                class="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-6 py-2 rounded w-full">
+                                {{ fullAutoRunning ? '运行中...' : '开始批量验证' }}
+                            </button>
+                        </div>
+                    </div>
+                    <div v-if="autoEmailSource === 'pool'" class="mt-3 text-gray-400 text-sm">
+                        可用邮箱: {{ availableEmails.length }} 个
+                    </div>
+                </div>
+
+                <!-- 模式3: 单账号验证（合并原来的半自动模式） -->
+                <div v-if="currentMode === 'single_verify'">
+                    <div class="bg-blue-900/30 border border-blue-600/50 rounded-lg p-3 mb-4">
+                        <div class="text-blue-400 font-semibold">单账号验证</div>
+                        <div class="text-gray-300 text-sm">验证单个 ChatGPT 账号，成功后暂停（可用于已有账号或邮箱池账号）</div>
+                    </div>
+
+                    <!-- 账号类型选择 -->
+                    <div class="mb-4">
+                        <label class="block text-gray-400 text-sm mb-2">账号类型</label>
+                        <div class="flex gap-4">
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleVerifyMode === 'cdp' ? 'ring-2 ring-blue-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="cdp" class="mr-2">
+                                <div>
+                                    <div class="font-semibold">临时邮箱账号（推荐）</div>
+                                    <div class="text-xs text-gray-400">注册 = 接收 = 同一个临时邮箱</div>
+                                </div>
+                            </label>
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleVerifyMode === 'camoufox' ? 'ring-2 ring-blue-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="camoufox" class="mr-2">
+                                <div>
+                                    <div class="font-semibold">自有账号（消耗临时邮箱）</div>
+                                    <div class="text-xs text-gray-400">用自有邮箱登录，消耗一个临时邮箱</div>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- 临时邮箱账号模式提示 -->
+                    <div v-if="singleVerifyMode === 'cdp'" class="bg-gray-700 rounded p-3 mb-4">
+                        <div class="text-white font-semibold mb-2 text-sm">操作说明：</div>
+                        <div class="text-gray-300 text-xs space-y-1">
+                            <div>1. 运行 <code class="bg-gray-600 px-1 rounded">scripts/start-chrome-devtools.bat</code></div>
+                            <div>2. 选择临时邮箱，脚本自动退出旧账号</div>
+                            <div>3. 用此邮箱自动登录并完成验证</div>
+                        </div>
+                    </div>
+
+                    <!-- 自有账号模式：需要账号密码 + 临时邮箱 -->
+                    <div v-if="singleVerifyMode === 'camoufox'">
+                        <div class="bg-orange-900/30 border border-orange-600/50 rounded p-3 mb-4">
+                            <div class="text-orange-400 text-xs">
+                                自有账号登录后，需要消耗一个临时邮箱来接收验证链接。
+                                验证成功后 Plus 给自有账号，临时邮箱标记为已消耗。
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label class="block text-gray-400 text-sm mb-1">自有账号邮箱</label>
+                                <input v-model="singleChatgptEmail" type="email" placeholder="your@gmail.com"
+                                    class="w-full bg-gray-700 text-white px-3 py-2 rounded">
+                            </div>
+                            <div>
+                                <label class="block text-gray-400 text-sm mb-1">账号密码</label>
+                                <input v-model="singleChatgptPassword" type="password" class="w-full bg-gray-700 text-white px-3 py-2 rounded">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 临时邮箱选择（两种模式都需要，但用途不同） -->
+                    <div class="mb-4">
+                        <label class="block text-gray-400 text-sm mb-2">
+                            {{ singleVerifyMode === 'cdp' ? '临时邮箱（注册 + 接收链接）' : '临时邮箱（消耗：只用于接收链接）' }}
+                        </label>
+                        <div class="flex gap-4 mb-2">
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer">
+                                <input type="radio" v-model="singleEmailSource" value="pool" class="mr-2"> 从邮箱池选择
+                            </label>
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer">
+                                <input type="radio" v-model="singleEmailSource" value="manual" class="mr-2"> 手动输入
+                            </label>
+                        </div>
+                        <div v-if="singleEmailSource === 'pool'">
+                            <select v-model="singleTempEmail" class="w-full bg-gray-700 text-white px-3 py-2 rounded">
+                                <option value="">选择邮箱...</option>
+                                <option v-for="e in availableEmails" :key="e.address" :value="e.address">
+                                    {{ e.address }}
+                                </option>
+                            </select>
+                        </div>
+                        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            <input v-model="singleManualEmail" type="email" placeholder="邮箱地址 (xxx@009025.xyz)"
+                                class="bg-gray-700 text-white px-3 py-2 rounded">
+                            <input v-model="singleManualJwt" type="text" placeholder="JWT Token (用于查询邮件)"
+                                class="bg-gray-700 text-white px-3 py-2 rounded">
+                        </div>
+                        <!-- 已消耗检测提示 -->
+                        <div v-if="singleEmailConsumedWarning" class="bg-red-900/50 border border-red-600 rounded p-2 mt-2">
+                            <div class="text-red-400 text-xs">
+                                ⚠️ 此邮箱已验证过，会导致报错 "already been approved"，请换其他邮箱！
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 开始按钮 -->
+                    <div>
+                        <button @click="startSingleVerify" :disabled="singleRunning || singleEmailConsumedWarning"
+                            class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-6 py-2 rounded">
+                            {{ singleRunning ? '运行中...' : '开始验证' }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 操作日志面板 -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold text-white mb-4">操作日志</h2>
+            <div class="bg-gray-700 rounded p-3 h-48 overflow-y-auto font-mono text-xs">
+                <div v-for="log in logs" :key="log.time"
+                    :class="log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : 'text-gray-300'">
+                    [{{ log.time }}] {{ log.message }}
+                </div>
+                <div v-if="logs.length === 0" class="text-gray-500">暂无日志</div>
             </div>
         </div>
 
@@ -83,16 +323,13 @@
                 <h2 class="text-xl font-semibold text-white">账号列表</h2>
                 <div class="flex gap-2">
                     <select v-model="statusFilter" @change="fetchAccounts"
-                        class="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 text-sm">
+                        class="bg-gray-700 text-white px-3 py-1 rounded text-sm">
                         <option value="">全部</option>
-                        <option value="success">成功</option>
-                        <option value="failed">失败</option>
-                        <option value="pending">进行中</option>
+                        <option value="verified">已验证</option>
+                        <option value="pending">待处理</option>
                     </select>
-                    <button @click="exportAccounts"
-                        class="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded text-sm">
-                        导出
-                    </button>
+                    <button @click="exportAccounts" class="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded text-sm">导出</button>
+                    <button @click="fetchAccounts" class="bg-gray-600 hover:bg-gray-500 text-white px-4 py-1 rounded text-sm">刷新</button>
                 </div>
             </div>
             <div class="overflow-x-auto">
@@ -101,10 +338,8 @@
                         <tr class="text-gray-400 text-sm border-b border-gray-700">
                             <th class="pb-3">邮箱</th>
                             <th class="pb-3">密码</th>
-                            <th class="pb-3">姓名</th>
-                            <th class="pb-3">军种</th>
                             <th class="pb-3">状态</th>
-                            <th class="pb-3">错误信息</th>
+                            <th class="pb-3">备注</th>
                             <th class="pb-3">操作</th>
                         </tr>
                     </thead>
@@ -112,240 +347,752 @@
                         <tr v-for="acc in accounts" :key="acc.email" class="border-b border-gray-700 text-gray-300">
                             <td class="py-3 text-sm font-mono">{{ acc.email }}</td>
                             <td class="py-3 text-sm font-mono text-green-400">{{ acc.password || '-' }}</td>
-                            <td class="py-3">{{ acc.first_name }} {{ acc.last_name }}</td>
-                            <td class="py-3 text-sm">{{ acc.branch }}</td>
                             <td class="py-3">
-                                <span :class="getStatusClass(acc.status)" class="px-2 py-1 rounded text-xs font-semibold">
-                                    {{ getStatusText(acc.status) }}
-                                </span>
+                                <span :class="getStatusClass(acc.status)" class="px-2 py-1 rounded text-xs">{{ acc.status }}</span>
                             </td>
-                            <td class="py-3 text-sm text-red-400 max-w-xs truncate" :title="acc.error_message">
-                                {{ acc.error_message || '-' }}
-                            </td>
-                            <td class="py-3">
-                                <button v-if="acc.status === 'failed'" @click="retryAccount(acc.email)"
-                                    class="text-blue-400 hover:text-blue-300 text-sm mr-2">重试</button>
-                                <button @click="deleteAccount(acc.email)"
-                                    class="text-red-400 hover:text-red-300 text-sm">删除</button>
+                            <td class="py-3 text-xs text-gray-400 max-w-xs truncate">{{ acc.note || '-' }}</td>
+                            <td class="py-3 flex gap-2">
+                                <button @click="showAccountDetail(acc.email)"
+                                    class="text-green-400 hover:text-green-300 text-sm">详情</button>
+                                <button @click="selectedEmail = acc.email; prepareVerify()"
+                                    class="text-blue-400 hover:text-blue-300 text-sm">验证</button>
                             </td>
                         </tr>
                     </tbody>
                 </table>
-                <div v-if="accounts.length === 0" class="text-center py-8 text-gray-500">
-                    暂无账号
-                </div>
+                <div v-if="accounts.length === 0" class="text-center py-8 text-gray-500">暂无账号</div>
             </div>
-            <!-- 分页 -->
-            <div v-if="totalPages > 1" class="flex justify-center gap-2 mt-4">
-                <button @click="page = Math.max(1, page - 1); fetchAccounts()"
-                    :disabled="page <= 1"
-                    class="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white px-3 py-1 rounded text-sm">
-                    上一页
-                </button>
-                <span class="text-gray-400 py-1">{{ page }} / {{ totalPages }}</span>
-                <button @click="page = Math.min(totalPages, page + 1); fetchAccounts()"
-                    :disabled="page >= totalPages"
-                    class="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white px-3 py-1 rounded text-sm">
-                    下一页
-                </button>
+        </div>
+
+        <!-- 账号详情模态框 -->
+        <div v-if="detailModal.show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50" @click.self="detailModal.show = false">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-semibold text-white">账号详情</h3>
+                    <button @click="detailModal.show = false" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+                </div>
+
+                <div v-if="detailModal.loading" class="text-center py-8 text-gray-400">加载中...</div>
+                <div v-else-if="detailModal.account">
+                    <!-- 成功验证信息（如果是 verified 状态） -->
+                    <div v-if="detailModal.account.status === 'verified' && detailModal.successVerification"
+                        class="bg-green-900/30 border border-green-600 rounded p-4 mb-4">
+                        <div class="flex items-center gap-2 mb-3">
+                            <span class="text-green-400 text-lg">✅</span>
+                            <h4 class="text-green-400 font-semibold">验证成功 - 军人信息</h4>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 text-sm">
+                            <div class="text-gray-400">姓名:</div>
+                            <div class="text-white font-semibold">{{ detailModal.successVerification.first_name }} {{ detailModal.successVerification.last_name }}</div>
+                            <div class="text-gray-400">军种:</div>
+                            <div class="text-white">{{ detailModal.successVerification.branch }}</div>
+                            <div class="text-gray-400">军人生日:</div>
+                            <div class="text-white">{{ detailModal.successVerification.birth_month }} {{ detailModal.successVerification.birth_day }}, {{ detailModal.successVerification.birth_year }}</div>
+                            <div class="text-gray-400">退伍日期:</div>
+                            <div class="text-white">{{ detailModal.successVerification.discharge_month }} {{ detailModal.successVerification.discharge_day }}, {{ detailModal.successVerification.discharge_year }}</div>
+                            <div class="text-gray-400">验证时间:</div>
+                            <div class="text-white">{{ formatTime(detailModal.successVerification.completed_at || detailModal.successVerification.created_at) }}</div>
+                        </div>
+                    </div>
+
+                    <!-- 基本信息 -->
+                    <div class="bg-gray-700 rounded p-4 mb-4">
+                        <h4 class="text-white font-semibold mb-3">ChatGPT 账号信息</h4>
+                        <div class="grid grid-cols-2 gap-2 text-sm">
+                            <div class="text-gray-400">邮箱:</div>
+                            <div class="text-white font-mono">{{ detailModal.account.email }}</div>
+                            <div class="text-gray-400">密码:</div>
+                            <div class="text-green-400 font-mono">{{ detailModal.account.password }}</div>
+                            <div class="text-gray-400">状态:</div>
+                            <div><span :class="getStatusClass(detailModal.account.status)" class="px-2 py-1 rounded text-xs">{{ detailModal.account.status }}</span></div>
+                            <div v-if="detailModal.account.profile_name" class="text-gray-400">注册姓名:</div>
+                            <div v-if="detailModal.account.profile_name" class="text-white">{{ detailModal.account.profile_name }}</div>
+                            <div v-if="detailModal.account.profile_birthday" class="text-gray-400">注册生日:</div>
+                            <div v-if="detailModal.account.profile_birthday" class="text-white">{{ detailModal.account.profile_birthday }}</div>
+                            <div class="text-gray-400">创建时间:</div>
+                            <div class="text-gray-300">{{ formatTime(detailModal.account.created_at) }}</div>
+                        </div>
+                    </div>
+
+                    <!-- 临时邮箱凭证（始终显示） -->
+                    <div class="bg-gray-700 rounded p-4 mb-4">
+                        <h4 class="text-white font-semibold mb-3">临时邮箱凭证</h4>
+                        <div class="space-y-2 text-sm">
+                            <div class="flex items-start gap-2">
+                                <div class="text-gray-400 w-24 flex-shrink-0">登录地址:</div>
+                                <div class="text-blue-400">
+                                    <a href="https://one.009025.xyz/" target="_blank" class="underline hover:text-blue-300">https://one.009025.xyz/</a>
+                                </div>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <div class="text-gray-400 w-24 flex-shrink-0">邮箱地址:</div>
+                                <div class="text-white font-mono">{{ detailModal.account.email }}</div>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <div class="text-gray-400 w-24 flex-shrink-0">JWT Token:</div>
+                                <div class="flex-1 break-all">
+                                    <code v-if="detailModal.account.jwt" class="text-green-400 font-mono text-xs bg-gray-800 px-2 py-1 rounded block max-h-20 overflow-y-auto">{{ detailModal.account.jwt }}</code>
+                                    <span v-else class="text-gray-500 text-xs">未保存（早期账号）</span>
+                                </div>
+                            </div>
+                            <div class="text-gray-400 text-xs mt-2 pt-2 border-t border-gray-600">
+                                <span class="text-yellow-400">前端登录:</span> 输入邮箱地址即可 |
+                                <span class="text-yellow-400">API 查询:</span> 使用 JWT Token
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 验证统计 -->
+                    <div class="bg-gray-700 rounded p-4">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-400 text-sm">验证尝试次数:</span>
+                            <span class="text-white font-semibold">{{ detailModal.verifications.length }} 次</span>
+                        </div>
+                    </div>
+
+                    <!-- 复制信息按钮 -->
+                    <div class="mt-4 flex gap-2">
+                        <button @click="copyAccountInfo()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm">
+                            复制登录信息
+                        </button>
+                        <button @click="detailModal.show = false" class="bg-gray-600 hover:bg-gray-500 text-white px-4 py-2 rounded text-sm">
+                            关闭
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-    const { createApp, ref, onMounted } = Vue;
+    const { createApp, ref, computed, onMounted } = Vue;
 
     createApp({
         setup() {
-            const systemStatus = ref('running');
-            const stats = ref({});
+            // 统计
             const vetStats = ref({});
-            const queueSize = ref(0);
-            const accounts = ref([]);
-            const createCount = ref(1);
-            const createInterval = ref(0);
-            const creating = ref(false);
-            const statusFilter = ref('');
-            const page = ref(1);
-            const totalPages = ref(1);
+            const emailPoolStats = ref({});
+            const accountStats = ref({});
+            const verStats = ref({});
 
-            const statusTextMap = {
-                'pending': '等待中',
-                'creating_email': '创建邮箱',
-                'registering': '注册中',
-                'waiting_code': '等待验证码',
-                'chatgpt_ready': 'ChatGPT就绪',
-                'opening_sheerid': '打开验证页',
-                'filling_form': '填写表单',
-                'waiting_link': '等待链接',
-                'clicking_link': '点击链接',
-                'success': '成功',
-                'failed': '失败'
+            // 模式（简化为3个）
+            const modes = [
+                { id: 'email_pool', name: '邮箱池' },
+                { id: 'full_auto', name: '全自动批量' },
+                { id: 'single_verify', name: '单账号验证' }
+            ];
+            const currentMode = ref('email_pool');
+
+            // 邮箱池
+            const emailPool = ref([]);
+            const emailCreateCount = ref(5);
+            const creatingEmails = ref(false);
+            const externalEmail = ref('');
+            const externalJwt = ref('');
+
+            // 全自动（批量模式）
+            const autoEmailSource = ref('pool');
+            const selectedPoolEmail = ref('');
+            const fullAutoRunning = ref(false);
+            const batchSuccessCount = ref(1);  // 成功N个后暂停
+
+            // 单账号验证（合并原来的半自动模式）
+            const singleVerifyMode = ref('cdp');  // cdp（手动登录后接管）或 camoufox（脚本登录）
+            const singleChatgptEmail = ref('');   // ChatGPT 账号（脚本登录时需要）
+            const singleChatgptPassword = ref('');
+            const singleEmailSource = ref('pool');  // pool 或 manual
+            const singleTempEmail = ref('');        // 从邮箱池选择
+            const singleManualEmail = ref('');      // 手动输入邮箱
+            const singleManualJwt = ref('');        // 手动输入 JWT
+            const singleRunning = ref(false);
+
+            // 运行中任务
+            const runningTask = ref(null);
+            let taskPollTimer = null;
+
+            // 账号详情模态框
+            const detailModal = ref({
+                show: false,
+                loading: false,
+                account: null,
+                verifications: [],
+                successVerification: null  // 成功的验证记录
+            });
+
+            // 时间格式化
+            const formatTime = (timeStr) => {
+                if (!timeStr) return '-';
+                try {
+                    const date = new Date(timeStr);
+                    return date.toLocaleString('zh-CN', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                } catch (e) {
+                    return timeStr;
+                }
             };
 
-            const getStatusText = (status) => statusTextMap[status] || status;
+            // 验证
+            const accounts = ref([]);
+            const statusFilter = ref('');
+            const selectedEmail = ref('');
+            const currentFormData = ref(null);
+            const currentVerificationId = ref(null);
+            const currentVeteranId = ref(null);
+            const loading = ref(false);
+            const logs = ref([]);
+
+            // 可用邮箱（用于下拉选择）
+            const availableEmails = computed(() => emailPool.value.filter(e => e.status === 'available'));
+            // 可见邮箱（邮箱池列表显示，排除 consumed 状态）
+            const visibleEmails = computed(() => emailPool.value.filter(e => e.status !== 'consumed'));
+
+            // 检测单账号验证模式临时邮箱是否已消耗
+            const singleEmailConsumedWarning = computed(() => {
+                let email = '';
+                if (singleEmailSource.value === 'pool') {
+                    email = singleTempEmail.value;
+                } else {
+                    email = singleManualEmail.value;
+                }
+                if (!email) return false;
+                const found = emailPool.value.find(e => e.address === email);
+                return found && (found.status === 'consumed' || found.status === 'verified');
+            });
+
+            const addLog = (message, type = 'info') => {
+                const time = new Date().toLocaleTimeString();
+                logs.value.unshift({ time, message, type });
+                if (logs.value.length > 50) logs.value.pop();
+            };
 
             const fetchStatus = async () => {
                 try {
                     const res = await fetch('/api/status');
                     const data = await res.json();
                     if (data.success) {
-                        stats.value = data.accounts || {};
-                        queueSize.value = data.queue_size || 0;
+                        accountStats.value = { total: Object.values(data.accounts || {}).reduce((a, b) => a + b, 0), ...data.accounts };
+                        vetStats.value = data.veterans || {};
+                        verStats.value = data.verifications || {};
                     }
-                } catch (e) {
-                    console.error('获取状态失败:', e);
-                }
+                } catch (e) {}
             };
 
-            const fetchVetStats = async () => {
+            const fetchEmailPool = async () => {
                 try {
-                    const res = await fetch('/api/veteran-data/stats');
+                    const res = await fetch('/api/email-pool');
                     const data = await res.json();
                     if (data.success) {
-                        vetStats.value = data.stats || {};
+                        emailPool.value = data.emails || [];
+                        emailPoolStats.value = data.stats || {};
+                    }
+                } catch (e) {}
+            };
+
+            const reloadEmailPool = async () => {
+                try {
+                    addLog('正在刷新邮箱池...', 'info');
+                    const res = await fetch('/api/email-pool/reload', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog('邮箱池已刷新', 'success');
+                        fetchEmailPool();
+                    } else {
+                        addLog(data.error || '刷新失败', 'error');
                     }
                 } catch (e) {
-                    console.error('获取军人数据统计失败:', e);
+                    addLog('刷新请求失败', 'error');
                 }
             };
 
             const fetchAccounts = async () => {
                 try {
-                    const params = new URLSearchParams({
-                        page: page.value,
-                        per_page: 20
-                    });
+                    const params = new URLSearchParams({ per_page: 50 });
                     if (statusFilter.value) params.set('status', statusFilter.value);
-
                     const res = await fetch(`/api/accounts?${params}`);
                     const data = await res.json();
                     if (data.success) {
                         accounts.value = data.accounts || [];
-                        totalPages.value = data.total_pages || 1;
+                    }
+                } catch (e) {}
+            };
+
+            const createEmails = async () => {
+                creatingEmails.value = true;
+                try {
+                    const res = await fetch('/api/email-pool', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ count: emailCreateCount.value })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(`创建了 ${data.created?.length || 0} 个邮箱`, 'success');
+                        fetchEmailPool();
+                    } else {
+                        addLog(data.error || '创建失败', 'error');
                     }
                 } catch (e) {
-                    console.error('获取账号列表失败:', e);
+                    addLog('请求失败', 'error');
+                } finally {
+                    creatingEmails.value = false;
                 }
             };
 
-            const createAccounts = async () => {
-                creating.value = true;
+            const addExternalEmail = async () => {
+                if (!externalEmail.value || !externalJwt.value) {
+                    addLog('请填写邮箱地址和 JWT', 'error');
+                    return;
+                }
                 try {
-                    const res = await fetch('/api/accounts', {
+                    const res = await fetch('/api/email-pool/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ address: externalEmail.value, jwt: externalJwt.value })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog('邮箱添加成功', 'success');
+                        externalEmail.value = '';
+                        externalJwt.value = '';
+                        fetchEmailPool();
+                    } else {
+                        addLog(data.error || '添加失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('请求失败', 'error');
+                }
+            };
+
+            const deleteEmail = async (address) => {
+                if (!confirm('确定删除此邮箱?')) return;
+                try {
+                    await fetch(`/api/email-pool/${encodeURIComponent(address)}`, { method: 'DELETE' });
+                    fetchEmailPool();
+                } catch (e) {}
+            };
+
+            const prepareVerify = async () => {
+                if (!selectedEmail.value) {
+                    addLog('请先选择账号', 'error');
+                    return;
+                }
+                loading.value = true;
+                try {
+                    const res = await fetch('/api/verify/prepare', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: selectedEmail.value })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        currentFormData.value = data.form_data;
+                        currentVerificationId.value = data.verification_id;
+                        currentVeteranId.value = data.veteran_id;
+                        addLog(`获取数据: ${data.form_data.first_name} ${data.form_data.last_name} (${data.form_data.branch})`, 'success');
+                    } else {
+                        addLog(data.error || '获取失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('请求失败', 'error');
+                } finally {
+                    loading.value = false;
+                }
+            };
+
+            const reportResult = async (result) => {
+                if (!currentVerificationId.value) return;
+                try {
+                    const res = await fetch('/api/verify/result', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            count: createCount.value,
-                            interval: createInterval.value
+                            verification_id: currentVerificationId.value,
+                            veteran_id: currentVeteranId.value,
+                            result: result
                         })
                     });
                     const data = await res.json();
                     if (data.success) {
-                        fetchAccounts();
-                        fetchStatus();
-                    } else {
-                        alert(data.error || '创建账号失败');
+                        addLog(`结果: ${result} - ${data.message}`, result === 'success' ? 'success' : 'info');
+                        if (data.action === 'next') {
+                            setTimeout(prepareVerify, 500);
+                        } else if (data.action === 'done') {
+                            currentFormData.value = null;
+                            currentVerificationId.value = null;
+                            fetchStatus();
+                        }
                     }
                 } catch (e) {
-                    console.error('创建账号失败:', e);
-                    alert('创建账号失败');
-                } finally {
-                    creating.value = false;
+                    addLog('请求失败', 'error');
                 }
             };
 
-            const retryAccount = async (email) => {
-                try {
-                    await fetch(`/api/accounts/${encodeURIComponent(email)}/retry`, { method: 'POST' });
-                    fetchAccounts();
-                    fetchStatus();
-                } catch (e) {
-                    console.error('重试失败:', e);
-                }
-            };
-
-            const deleteAccount = async (email) => {
-                if (!confirm('确定删除这个账号吗？')) return;
-                try {
-                    await fetch(`/api/accounts/${encodeURIComponent(email)}`, { method: 'DELETE' });
-                    fetchAccounts();
-                    fetchStatus();
-                } catch (e) {
-                    console.error('删除失败:', e);
-                }
-            };
-
-            const stopAll = async () => {
-                if (!confirm('确定停止所有任务吗？')) return;
-                try {
-                    await fetch('/api/accounts/stop-all', { method: 'POST' });
-                    fetchAccounts();
-                    fetchStatus();
-                } catch (e) {
-                    console.error('停止失败:', e);
-                }
+            const copyFormData = () => {
+                if (!currentFormData.value) return;
+                navigator.clipboard.writeText(JSON.stringify(currentFormData.value, null, 2));
+                addLog('已复制', 'success');
             };
 
             const exportAccounts = async () => {
+                const res = await fetch('/api/accounts/export');
+                const data = await res.json();
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `veterans-${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
+            };
+
+            // 显示账号详情
+            const showAccountDetail = async (email) => {
+                detailModal.value.show = true;
+                detailModal.value.loading = true;
+                detailModal.value.account = null;
+                detailModal.value.verifications = [];
+                detailModal.value.successVerification = null;
+
                 try {
-                    const res = await fetch('/api/accounts/export');
+                    const res = await fetch(`/api/accounts/${encodeURIComponent(email)}`);
                     const data = await res.json();
-                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `veterans-accounts-${new Date().toISOString().slice(0,10)}.json`;
-                    a.click();
-                    URL.revokeObjectURL(url);
+                    if (data.success) {
+                        detailModal.value.account = data.account;
+                        detailModal.value.verifications = data.verifications || [];
+                        // 查找成功的验证记录
+                        detailModal.value.successVerification = detailModal.value.verifications.find(v => v.status === 'success') || null;
+                    } else {
+                        addLog(data.error || '获取详情失败', 'error');
+                        detailModal.value.show = false;
+                    }
                 } catch (e) {
-                    console.error('导出失败:', e);
+                    addLog('获取详情请求失败', 'error');
+                    detailModal.value.show = false;
+                } finally {
+                    detailModal.value.loading = false;
                 }
             };
 
-            const getStatusClass = (status) => {
-                const classes = {
-                    'pending': 'bg-gray-600',
-                    'creating_email': 'bg-blue-600',
-                    'registering': 'bg-blue-600',
-                    'waiting_code': 'bg-yellow-600',
-                    'chatgpt_ready': 'bg-blue-600',
-                    'filling_form': 'bg-blue-600',
-                    'waiting_link': 'bg-yellow-600',
-                    'success': 'bg-green-600',
-                    'failed': 'bg-red-600'
-                };
-                return classes[status] || 'bg-gray-600';
+            // 复制账号登录信息
+            const copyAccountInfo = () => {
+                if (!detailModal.value.account) return;
+                const acc = detailModal.value.account;
+                let info = `=== ChatGPT 登录信息 ===
+邮箱: ${acc.email}
+密码: ${acc.password}
+
+=== 临时邮箱凭证 ===
+登录地址: https://one.009025.xyz/
+邮箱地址: ${acc.email}`;
+
+                if (acc.jwt) {
+                    info += `
+JWT Token: ${acc.jwt}`;
+                }
+
+                info += `
+
+使用说明:
+- 前端登录: 访问登录地址，输入邮箱地址即可
+- API 查询: 使用 JWT Token 查询邮件`;
+
+                navigator.clipboard.writeText(info);
+                addLog('登录信息已复制到剪贴板', 'success');
             };
+
+            // 启动验证任务
+            const startVerifyTask = async (email, mode = 'cdp', headless = false) => {
+                if (!email) {
+                    addLog('请选择邮箱', 'error');
+                    return false;
+                }
+                try {
+                    const res = await fetch('/api/verify/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, mode, headless })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(`验证任务已启动: ${email} (${mode})`, 'success');
+                        // 开始轮询状态
+                        pollTaskStatus(email);
+                        return true;
+                    } else {
+                        addLog(data.error || '启动失败', 'error');
+                        return false;
+                    }
+                } catch (e) {
+                    addLog('请求失败: ' + e.message, 'error');
+                    return false;
+                }
+            };
+
+            // 轮询任务状态
+            const pollTaskStatus = (email) => {
+                // 清除旧的轮询
+                if (taskPollTimer) {
+                    clearInterval(taskPollTimer);
+                }
+
+                const poll = async () => {
+                    try {
+                        const res = await fetch(`/api/verify/status/${encodeURIComponent(email)}`);
+                        const data = await res.json();
+                        if (data.success && data.task) {
+                            const task = data.task;
+                            task.email = email;
+
+                            if (task.status === 'running') {
+                                runningTask.value = task;
+                                // 更新日志显示
+                                if (task.logs && task.logs.length > 0) {
+                                    const lastLog = task.logs[task.logs.length - 1];
+                                    if (!logs.value.find(l => l.message === lastLog)) {
+                                        addLog(lastLog, 'info');
+                                    }
+                                }
+                            } else if (task.status === 'success') {
+                                addLog(`✅ 验证成功: ${email}`, 'success');
+                                runningTask.value = null;
+                                fullAutoRunning.value = false;
+                                singleRunning.value = false;
+                                clearInterval(taskPollTimer);
+                                taskPollTimer = null;
+                                fetchStatus();
+                            } else {
+                                addLog(`任务结束: ${task.status} - ${task.error || ''}`, task.status === 'error' ? 'error' : 'info');
+                                runningTask.value = null;
+                                fullAutoRunning.value = false;
+                                singleRunning.value = false;
+                                clearInterval(taskPollTimer);
+                                taskPollTimer = null;
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Poll error:', e);
+                    }
+                };
+
+                // 立即执行一次，然后每3秒轮询
+                setTimeout(poll, 1000);
+                taskPollTimer = setInterval(poll, 3000);
+            };
+
+            // 停止任务
+            const stopTask = async (email) => {
+                if (!confirm('确定要停止任务吗？')) return;
+                try {
+                    const res = await fetch(`/api/verify/stop/${encodeURIComponent(email)}`, {
+                        method: 'POST'
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(`任务已停止: ${email}`, 'info');
+                        runningTask.value = null;
+                        fullAutoRunning.value = false;
+                        singleRunning.value = false;
+                        if (taskPollTimer) {
+                            clearInterval(taskPollTimer);
+                            taskPollTimer = null;
+                        }
+                    } else {
+                        addLog(data.error || '停止失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('停止请求失败', 'error');
+                }
+            };
+
+            // 重启任务
+            const restartTask = async (email) => {
+                if (!confirm('确定要重启任务吗？')) return;
+                try {
+                    addLog(`正在重启任务: ${email}...`, 'info');
+                    const res = await fetch(`/api/verify/restart/${encodeURIComponent(email)}`, { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(`任务已重启: ${email}`, 'success');
+                        pollTaskStatus(email);
+                    } else {
+                        addLog(data.error || '重启失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('重启请求失败', 'error');
+                }
+            };
+
+            // 退出 ChatGPT 登录
+            const logoutChatgpt = async () => {
+                if (!confirm('确定要退出 ChatGPT 登录吗？\n\n这将清除浏览器中的登录状态。')) return;
+                try {
+                    addLog('正在退出 ChatGPT 登录...', 'info');
+                    const res = await fetch('/api/logout/chatgpt', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(`✓ ${data.message}`, 'success');
+                    } else {
+                        addLog(data.error || data.message || '退出失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('退出登录请求失败', 'error');
+                }
+            };
+
+            // 重启 Flask 服务
+            const restartService = async () => {
+                if (!confirm('确定要重启 Flask 服务吗？\n\n页面将在几秒后自动刷新。')) return;
+                try {
+                    const res = await fetch('/api/service/restart', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        alert('服务正在重启，5秒后自动刷新页面...');
+                        setTimeout(() => location.reload(), 5000);
+                    }
+                } catch (e) {
+                    alert('重启请求失败');
+                }
+            };
+
+            // 获取运行中任务
+            const fetchRunningTasks = async () => {
+                try {
+                    const res = await fetch('/api/verify/running');
+                    const data = await res.json();
+                    if (data.success && data.tasks && data.tasks.length > 0) {
+                        const task = data.tasks[0];
+                        runningTask.value = task;
+                        // 如果有运行中任务，启动轮询
+                        if (!taskPollTimer) {
+                            pollTaskStatus(task.email);
+                        }
+                    }
+                } catch (e) {}
+            };
+
+            const startFullAuto = async () => {
+                if (fullAutoRunning.value) return;
+
+                let email = '';
+                if (autoEmailSource.value === 'pool') {
+                    email = selectedPoolEmail.value;
+                    if (!email) {
+                        addLog('请从邮箱池选择邮箱', 'error');
+                        return;
+                    }
+                } else {
+                    // 创建新邮箱
+                    addLog('正在创建新邮箱...', 'info');
+                    try {
+                        const res = await fetch('/api/email-pool', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ count: 1 })
+                        });
+                        const data = await res.json();
+                        if (data.success && data.created && data.created.length > 0) {
+                            email = data.created[0].address;
+                            addLog(`创建邮箱: ${email}`, 'success');
+                            fetchEmailPool();
+                        } else {
+                            addLog('创建邮箱失败', 'error');
+                            return;
+                        }
+                    } catch (e) {
+                        addLog('创建邮箱失败', 'error');
+                        return;
+                    }
+                }
+
+                fullAutoRunning.value = true;
+                addLog('全自动模式需要 Camoufox，启动中...', 'info');
+                if (await startVerifyTask(email, 'camoufox', true)) {
+                    // 任务启动成功
+                } else {
+                    fullAutoRunning.value = false;
+                }
+            };
+
+            const startSingleVerify = async () => {
+                if (singleRunning.value) return;
+
+                // 脚本登录模式需要账号密码
+                if (singleVerifyMode.value === 'camoufox') {
+                    if (!singleChatgptEmail.value || !singleChatgptPassword.value) {
+                        addLog('请输入 ChatGPT 账号密码', 'error');
+                        return;
+                    }
+                }
+
+                // 确定临时邮箱
+                let email = '';
+                let jwt = '';
+                if (singleEmailSource.value === 'pool') {
+                    if (!singleTempEmail.value) {
+                        addLog('请从邮箱池选择临时邮箱', 'error');
+                        return;
+                    }
+                    email = singleTempEmail.value;
+                    const poolEmail = emailPool.value.find(e => e.address === email);
+                    jwt = poolEmail?.jwt || '';
+                } else {
+                    if (!singleManualEmail.value || !singleManualJwt.value) {
+                        addLog('请输入临时邮箱地址和 JWT', 'error');
+                        return;
+                    }
+                    email = singleManualEmail.value;
+                    jwt = singleManualJwt.value;
+                }
+
+                singleRunning.value = true;
+                const modeName = singleVerifyMode.value === 'cdp' ? 'CDP 接管' : '脚本登录';
+                addLog(`单账号验证启动 (${modeName})...`, 'info');
+                addLog(`临时邮箱: ${email}`, 'info');
+
+                if (singleVerifyMode.value === 'cdp') {
+                    addLog('确保已运行 start-chrome-devtools.bat 并登录 ChatGPT', 'info');
+                } else {
+                    addLog('注意: 脚本登录可能需要手动处理验证码', 'info');
+                }
+
+                if (await startVerifyTask(email, singleVerifyMode.value, false)) {
+                    // 任务启动成功
+                } else {
+                    singleRunning.value = false;
+                }
+            };
+
+            const getStatusClass = (s) => ({ pending: 'bg-gray-600', registering: 'bg-blue-600', verified: 'bg-green-600', failed: 'bg-red-600' }[s] || 'bg-gray-600');
 
             onMounted(() => {
                 fetchStatus();
-                fetchVetStats();
+                fetchEmailPool();
                 fetchAccounts();
-                setInterval(fetchStatus, 5000);
-                setInterval(fetchAccounts, 5000);
+                fetchRunningTasks();  // 检查是否有运行中的任务
+                setInterval(fetchStatus, 10000);
+                setInterval(fetchEmailPool, 30000);
             });
 
             return {
-                systemStatus,
-                stats,
-                vetStats,
-                queueSize,
-                accounts,
-                createCount,
-                createInterval,
-                creating,
-                statusFilter,
-                page,
-                totalPages,
-                fetchAccounts,
-                createAccounts,
-                retryAccount,
-                deleteAccount,
-                stopAll,
-                exportAccounts,
-                getStatusClass,
-                getStatusText
+                vetStats, emailPoolStats, accountStats, verStats,
+                modes, currentMode,
+                emailPool, emailCreateCount, creatingEmails, externalEmail, externalJwt,
+                autoEmailSource, selectedPoolEmail, fullAutoRunning, batchSuccessCount,
+                // 单账号验证（合并后的变量）
+                singleVerifyMode, singleChatgptEmail, singleChatgptPassword,
+                singleEmailSource, singleTempEmail, singleManualEmail, singleManualJwt, singleRunning,
+                accounts, statusFilter, selectedEmail, currentFormData, currentVerificationId, currentVeteranId, loading, logs,
+                availableEmails, visibleEmails, singleEmailConsumedWarning,  // 邮箱过滤和消耗检测
+                runningTask, stopTask, restartTask, restartService, logoutChatgpt,  // 任务和服务控制
+                detailModal, showAccountDetail, copyAccountInfo, formatTime,  // 账号详情模态框
+                fetchAccounts, createEmails, addExternalEmail, deleteEmail, reloadEmailPool,
+                prepareVerify, reportResult, copyFormData, exportAccounts,
+                startFullAuto, startSingleVerify,  // 简化后的启动函数
+                getStatusClass
             };
         }
     }).mount('#app');

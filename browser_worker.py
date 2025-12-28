@@ -58,6 +58,9 @@ class VerifyTask:
     created_at: datetime = field(default_factory=datetime.now)
     completed_at: Optional[datetime] = None
     screenshots: list = field(default_factory=list)  # 截图路径列表
+    # GPT 注册时填写的信息（about-you 页面）
+    profile_name: Optional[str] = None
+    profile_birthday: Optional[str] = None
 
 
 class HumanBehavior:
@@ -250,7 +253,11 @@ class BrowserWorker:
             random_name = self.human.generate_random_name()
             random_birthday = self.human.generate_random_birthday(min_age=20, max_age=25)
 
-            logger.debug(f"[Task {task.task_id}] 随机姓名: {random_name}, 生日: {random_birthday}")
+            # 保存到 task 对象（用于后续持久化到数据库）
+            task.profile_name = random_name
+            task.profile_birthday = f"{random_birthday['month']}/{random_birthday['day']}/{random_birthday['year']}"
+
+            logger.debug(f"[Task {task.task_id}] 随机姓名: {random_name}, 生日: {task.profile_birthday}")
 
             # 1. 填写全名
             name_input = await self.page.wait_for_selector('input[name="name"]', timeout=10000)
@@ -732,6 +739,20 @@ class BrowserWorker:
                 task.completed_at = datetime.now()
                 logger.info(f"[Task {task.task_id}] 验证成功！")
                 await self.take_screenshot(task, "10_success")
+
+                # 保存账号信息到数据库（包括 profile_name 和 profile_birthday）
+                try:
+                    from database import update_account
+                    update_fields = {'status': 'verified'}
+                    if task.profile_name:
+                        update_fields['profile_name'] = task.profile_name
+                    if task.profile_birthday:
+                        update_fields['profile_birthday'] = task.profile_birthday
+                    update_account(task.email, **update_fields)
+                    logger.info(f"[Task {task.task_id}] 账号信息已保存: profile_name={task.profile_name}, profile_birthday={task.profile_birthday}")
+                except Exception as e:
+                    logger.warning(f"[Task {task.task_id}] 保存账号信息失败: {e}")
+
                 return True
             else:
                 task.status = VerifyStatus.FAILED

@@ -29,6 +29,18 @@ class EmailManager:
         self.worker_domain = worker_domain
         self.email_domain = email_domain
         self.admin_password = admin_password
+        # 创建不使用系统代理的 session
+        self._session = requests.Session()
+        self._session.trust_env = False  # 绕过系统代理
+
+    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        """统一请求方法（绕过代理）"""
+        url = f"https://{self.worker_domain}{path}"
+        kwargs.setdefault('timeout', 30)
+        kwargs.setdefault('headers', {})
+        kwargs['headers']['x-admin-auth'] = self.admin_password
+        kwargs['headers']['Content-Type'] = 'application/json'
+        return self._session.request(method, url, **kwargs)
 
     @staticmethod
     def generate_random_name() -> str:
@@ -43,19 +55,11 @@ class EmailManager:
         try:
             name = username if username else self.generate_random_name()
 
-            res = requests.post(
-                f"https://{self.worker_domain}/admin/new_address",
-                json={
-                    "enablePrefix": True,
-                    "name": name,
-                    "domain": self.email_domain,
-                },
-                headers={
-                    'x-admin-auth': self.admin_password,
-                    "Content-Type": "application/json"
-                },
-                timeout=30
-            )
+            res = self._request('POST', '/admin/new_address', json={
+                "enablePrefix": True,
+                "name": name,
+                "domain": self.email_domain,
+            })
 
             if res.status_code == 200:
                 data = res.json()
@@ -70,16 +74,9 @@ class EmailManager:
     def _get_recent_emails(self, email: str, limit: int = 10) -> List[dict]:
         """获取最近的邮件列表"""
         try:
-            api_url = f"https://{self.worker_domain}/admin/mails"
-            res = requests.get(
-                api_url,
-                params={"limit": limit, "offset": 0, "address": email},
-                headers={
-                    "x-admin-auth": self.admin_password,
-                    "Content-Type": "application/json"
-                },
-                timeout=30
-            )
+            res = self._request('GET', '/admin/mails', params={
+                "limit": limit, "offset": 0, "address": email
+            })
 
             if res.status_code == 200:
                 data = res.json()
@@ -246,8 +243,8 @@ class EmailManager:
                             link = match if isinstance(match, str) else match[0]
                             # 解码 URL
                             link = unquote(link)
-                            # 清理链接末尾的无效字符
-                            link = re.sub(r'["\'>]+$', '', link)
+                            # 清理链接末尾的无效字符（包括括号、引号等）
+                            link = re.sub(r'["\'>)(\]\[]+$', '', link)
 
                             # 验证链接格式
                             if 'sheerid' in link.lower() and ('verify' in link.lower() or 'verification' in link.lower()):

@@ -1,36 +1,42 @@
 @echo off
-chcp 65001 >nul
 
 echo ========================================
-echo   Chrome MCP - Port 9222
-echo   Profile: chrome-devtools-mcp
+echo   Chrome MCP - Port 9488
+echo   Fixed profile: veterans-chrome-profile
 echo ========================================
 echo.
 
-set PORT=9222
-set USER_DATA=C:\Users\asus\AppData\Local\Google\Chrome\User Data
-set PROFILE=chrome-devtools-mcp
-set CHROME=C:\Program Files\Google\Chrome\Application\chrome.exe
+set PORT=9488
+set USER_DATA=C:\temp\codex-chrome-profile
+set CHROME="C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-echo [!] This will close ALL Chrome windows.
+echo [!] Will close all Chrome windows first
 echo.
 pause
 
-echo [1] Killing all Chrome...
+echo [1] Killing Chrome...
 taskkill /F /IM chrome.exe >nul 2>&1
+timeout /t 2 >nul
+
+echo [2] Creating profile dir if not exists...
+if not exist "%USER_DATA%" mkdir "%USER_DATA%"
+
+echo [3] Starting Chrome...
+echo     Port: %PORT%
+echo     Profile: %USER_DATA%
+echo.
+
+start "" %CHROME% --remote-debugging-address=127.0.0.1 --remote-debugging-port=%PORT% --user-data-dir="%USER_DATA%"
+
 timeout /t 3 >nul
 
-echo [2] Starting Chrome...
-echo     Port: %PORT%
-echo     Profile: %PROFILE%
-echo.
-
-start "" "%CHROME%" --remote-debugging-port=%PORT% --user-data-dir="%USER_DATA%" --profile-directory="%PROFILE%" about:blank
-
-timeout /t 5 >nul
-
 echo.
 echo ========================================
-echo   Done! Port %PORT% ready.
+echo   Done! Debug port: http://127.0.0.1:%PORT%
+echo   Profile saved to: %USER_DATA%
 echo ========================================
+echo.
+echo   Extensions/logins will persist in this profile!
+echo   Next: Restart Claude Code
+echo.
 pause
