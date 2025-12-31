@@ -1079,14 +1079,19 @@ async def register_or_login_chatgpt(page, email: str, password: str, max_retries
                     logger.warning(f"未找到登录按钮 (retry {retry + 1})")
                     continue
 
-                # 等待弹窗或页面变化
-                await asyncio.sleep(2)
+                # 等待弹窗出现（关键！）
+                logger.info("等待登录弹窗...")
+                try:
+                    await page.wait_for_selector("dialog", timeout=5000)
+                    logger.info("✓ 弹窗已出现")
+                except:
+                    logger.warning("弹窗未出现，可能已跳转到登录页面")
+                await asyncio.sleep(1)
                 await save_screenshot(page, "02_after_login_click")
 
             # 4. 输入邮箱
             # ⚠️ 2025-12-31 修复：优先检测弹窗（dialog），在弹窗内操作
             logger.info("步骤 4/7: 输入邮箱")
-            await asyncio.sleep(1)
 
             current_url = page.url
             logger.info(f"当前页面 URL: {current_url}")
@@ -1100,14 +1105,25 @@ async def register_or_login_chatgpt(page, email: str, password: str, max_retries
                 if await dialog.count() > 0 and await dialog.is_visible():
                     logger.info("✓ 检测到登录弹窗（dialog）")
                     is_dialog = True
-                    # 在弹窗内查找邮箱输入框
-                    # 使用 get_by_role 更可靠
-                    email_input = dialog.get_by_role("textbox", name="电子邮件地址")
-                    if await email_input.count() == 0:
-                        # 回退到英文
-                        email_input = dialog.get_by_role("textbox", name="Email address")
+
+                    # 等待弹窗内容加载
+                    await asyncio.sleep(0.5)
+
+                    # 在弹窗内查找邮箱输入框（多种方式尝试）
+                    # 方式1a: 直接用 CSS 选择器在 dialog 内查找 input
+                    email_input = dialog.locator('input[type="text"], input[type="email"], input:not([type])')
                     if await email_input.count() > 0:
-                        logger.info("✓ 在弹窗内找到邮箱输入框")
+                        logger.info("✓ 在弹窗内找到邮箱输入框 (CSS)")
+                    else:
+                        # 方式1b: 用 placeholder 匹配
+                        email_input = dialog.locator('input[placeholder*="邮件"], input[placeholder*="email" i]')
+                        if await email_input.count() > 0:
+                            logger.info("✓ 在弹窗内找到邮箱输入框 (placeholder)")
+                        else:
+                            # 方式1c: get_by_role 作为最后尝试
+                            email_input = dialog.get_by_role("textbox")
+                            if await email_input.count() > 0:
+                                logger.info("✓ 在弹窗内找到邮箱输入框 (role)")
             except Exception as e:
                 logger.debug(f"弹窗检测失败: {e}")
 
