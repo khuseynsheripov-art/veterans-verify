@@ -45,9 +45,75 @@ E:\veterans-verify\scripts\start-chrome-devtools.bat
 
 ---
 
-## 页面2: 登录或注册
+## 页面1.5: chatgpt.com 主页登录弹窗（⚠️ 2025-12-31 新发现！）
+
+**URL**: `https://chatgpt.com/`（未登录状态）
+
+**重要发现**：点击主页"登录"按钮后，出现的是一个**弹窗对话框**（`dialog` 元素），不是跳转页面！
+
+### 主页元素（点击前）
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 登录按钮 | `button "登录"` | 点击打开弹窗 |
+| 注册按钮 | `button "免费注册"` | |
+| ⚠️ 个人资料菜单 | `button "打开"个人资料"菜单"` | **陷阱！未登录也存在！** |
+
+### 弹窗元素（dialog 内部）
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 弹窗容器 | `dialog` | 弹窗根元素 |
+| 标题 | `heading "登录或注册"` | |
+| 邮箱输入框 | `textbox "电子邮件地址"` | ✅ 正确目标 |
+| 继续按钮 | `button "继续"` | 提交邮箱 |
+| Google 登录 | `button "继续使用 Google 登录"` | ⚠️ 别误点！ |
+| Apple 登录 | `button "继续使用 Apple 登录"` | |
+| Microsoft 登录 | `button "继续使用 Microsoft 登录"` | |
+| 手机登录 | `button "继续使用手机登录"` | |
+| 关闭按钮 | `button "关闭"` | 在 banner 内 |
+
+### ⚠️ 常见错误
+
+1. **误判已登录**：`button "打开"个人资料"菜单"` 在未登录状态也存在！
+   - 不能用这个按钮判断是否已登录
+   - 应该检查是否有 `button "登录"` 按钮
+
+2. **输入位置错误**：弹窗内有多个按钮
+   - 正确目标：`textbox "电子邮件地址"`
+   - 错误目标：`button "继续使用 Google 登录"`（可能被误点）
+
+3. **选择器不匹配**：CSS 选择器 `input[name="email"]` 可能找不到弹窗中的 textbox
+   - 推荐用 Playwright 的 `get_by_role("textbox", name="电子邮件地址")`
+
+### 代码示例
+
+```python
+# 1. 在 chatgpt.com 主页点击登录按钮
+login_btn = page.get_by_role("button", name="登录")
+await login_btn.click()
+await asyncio.sleep(1)
+
+# 2. 等待弹窗出现
+dialog = page.locator("dialog")
+await dialog.wait_for(state="visible", timeout=5000)
+
+# 3. 在弹窗内输入邮箱（关键！）
+email_input = dialog.get_by_role("textbox", name="电子邮件地址")
+await email_input.fill("xxx@009025.xyz")
+
+# 4. 点击继续
+continue_btn = dialog.get_by_role("button", name="继续")
+await continue_btn.click()
+```
+
+---
+
+## 页面2: 登录或注册（auth.openai.com 页面版）
 
 **URL**: `https://auth.openai.com/log-in-or-create-account`
+
+> 注意：这是从 veterans-claim 页面进入时的登录页面。从 chatgpt.com 主页登录会先显示弹窗。
 
 | 元素 | CSS 选择器建议 | Playwright 选择器 |
 |------|---------------|------------------|
@@ -754,6 +820,28 @@ email_pool（临时邮箱池）:
 - **持久化信息完整性**
   - 邮箱池记录：address, jwt, status, linked_account, verified_veteran
   - 数据库记录：accounts 表 + verifications 表关联
+
+### 2025-12-31 00:35 UTC+8
+- **⚠️ CDP 全自动登录逻辑问题发现**
+  - 问题：脚本退出登录后，没有正确执行登录流程，直接跳转到了验证页面
+  - 原因分析：
+    1. `register_or_login_chatgpt` 函数在检测登录状态时可能过早返回 True
+    2. 检测用户头像按钮的逻辑 (`profile_btn`) 可能在退出登录后仍匹配到某些元素
+    3. 需要更严格的登录状态检测
+  - **正确的 CDP 全自动登录流程应该是**：
+    ```
+    1. logout_chatgpt() 退出当前登录 → 页面留在 chatgpt.com
+    2. register_or_login_chatgpt() 在 chatgpt.com 主页点击"登录"按钮
+    3. 跳转到 auth.openai.com → 输入邮箱 → 继续
+    4. 输入密码（新用户创建，老用户输入）→ 继续
+    5. 如需验证码 → 从临时邮箱获取验证码 → 输入
+    6. 如有 about-you 页面 → 填写姓名+生日
+    7. 登录成功 → 返回 True
+    8. run_verify_loop 导航到 veterans-claim → 开始验证
+    ```
+  - 待修复点：
+    - 移除过早的 `return True` 检测逻辑
+    - 确保登录流程完整执行后才返回成功
 
 ### 2025-12-25 20:00 UTC+8
 - 新增 "Error - Unable to verify" 错误详情

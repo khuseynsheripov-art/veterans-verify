@@ -33,12 +33,33 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / '.env.local')
 
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
+# 日志配置 - 确保实时输出（不缓冲）+ UTF-8 编码支持
+class FlushStreamHandler(logging.StreamHandler):
+    """每条日志后立即 flush，支持 UTF-8"""
+    def __init__(self, stream=None):
+        super().__init__(stream)
+        # Windows 需要 UTF-8 编码
+        if hasattr(self.stream, 'reconfigure'):
+            try:
+                self.stream.reconfigure(encoding='utf-8', errors='replace')
+            except:
+                pass
+
+    def emit(self, record):
+        try:
+            super().emit(record)
+            self.flush()
+        except UnicodeEncodeError:
+            # 回退：替换特殊字符
+            record.msg = record.msg.encode('ascii', 'replace').decode('ascii')
+            super().emit(record)
+            self.flush()
+
+# 配置 root logger
+handler = FlushStreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+logging.root.handlers = [handler]
+logging.root.setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 配置
@@ -158,6 +179,86 @@ def generate_discharge_date() -> Dict:
     }
 
 
+# ==================== 风控检测 ====================
+
+async def detect_captcha_or_block(page) -> Tuple[bool, str]:
+    """
+    检测是否触发风控（Cloudflare、reCAPTCHA、hCaptcha 等）
+
+    Returns:
+        (is_blocked, block_type)
+        - is_blocked: 是否被风控
+        - block_type: 风控类型（cloudflare/recaptcha/hcaptcha/rate_limit/unknown）
+    """
+    try:
+        text = await page.evaluate("() => document.body?.innerText || ''")
+        text_lower = text.lower()
+        html = await page.content()
+        html_lower = html.lower()
+
+        # Cloudflare 检测
+        cloudflare_markers = [
+            "checking your browser",
+            "just a moment",
+            "ray id:",
+            "cloudflare",
+            "please wait while we verify",
+            "ddos protection by cloudflare"
+        ]
+        for marker in cloudflare_markers:
+            if marker in text_lower or marker in html_lower:
+                return True, "cloudflare"
+
+        # reCAPTCHA 检测
+        recaptcha_markers = [
+            "recaptcha",
+            "g-recaptcha",
+            "grecaptcha",
+            "recaptcha-anchor"
+        ]
+        for marker in recaptcha_markers:
+            if marker in html_lower:
+                return True, "recaptcha"
+
+        # hCaptcha 检测
+        hcaptcha_markers = [
+            "hcaptcha",
+            "h-captcha"
+        ]
+        for marker in hcaptcha_markers:
+            if marker in html_lower:
+                return True, "hcaptcha"
+
+        # 速率限制检测
+        rate_limit_markers = [
+            "rate limit",
+            "too many requests",
+            "please try again later",
+            "slow down",
+            "request blocked"
+        ]
+        for marker in rate_limit_markers:
+            if marker in text_lower:
+                return True, "rate_limit"
+
+        # 通用阻止检测
+        block_markers = [
+            "access denied",
+            "forbidden",
+            "blocked",
+            "not authorized"
+        ]
+        for marker in block_markers:
+            if marker in text_lower and len(text) < 500:  # 短页面更可能是阻止页
+                return True, "blocked"
+
+        return False, ""
+
+    except Exception as e:
+        logger.debug(f"风控检测异常: {e}")
+        return False, ""
+
+
 # ==================== 页面状态检测 ====================
 
 async def detect_page_state(page) -> Tuple[str, str]:
@@ -235,15 +336,29 @@ async def detect_page_state(page) -> Tuple[str, str]:
             return "error_retry", "Error occurred, need retry"
 
         # veterans-claim 页面判断
-        if "veterans-claim" in url and ("验证资格条件" in text or "verify your eligibility" in text_lower or "verify eligibility" in text_lower):
-            return "veterans_claim", "On veterans-claim (logged in)"
-
         if "veterans-claim" in url:
-            return "veterans_claim_check", "On veterans-claim page"
+            # 检测登录状态
+            has_login_button = "log in" in text_lower or "sign up" in text_lower or "get started" in text_lower
+            has_verify_button = "verify your eligibility" in text_lower or "verify eligibility" in text_lower or "验证资格条件" in text
+
+            if has_login_button and not has_verify_button:
+                # 有登录按钮但没有验证按钮 = 未登录
+                return "veterans_claim_not_logged_in", "On veterans-claim (NOT logged in)"
+
+            if has_verify_button:
+                # 有验证按钮 = 已登录且未验证
+                return "veterans_claim", "On veterans-claim (logged in, need verify)"
+
+            # 其他情况
+            return "veterans_claim_check", "On veterans-claim page (unknown state)"
 
         # ChatGPT 首页
         if "chatgpt.com" in url and "veterans-claim" not in url:
             return "chatgpt_home", "On ChatGPT home"
+
+        # OpenAI 登录页面 - 需要继续登录流程
+        if "auth.openai.com" in url or "auth0.openai.com" in url:
+            return "auth_page", f"On auth page, need to complete login"
 
         # SheerID 页面但状态不明
         if "sheerid.com" in url:
@@ -543,65 +658,715 @@ async def get_logged_in_account(page) -> Optional[str]:
         return None
 
 
-async def logout_chatgpt(page) -> bool:
+async def logout_chatgpt(page, timeout: int = 30) -> bool:
     """
     退出 ChatGPT 登录，为下一个账号做准备
 
-    退出方式：
-    1. 尝试点击用户菜单 → 退出登录
-    2. 如果失败，清除 cookies 并刷新
+    CDP 兼容版本：
+    1. 优先使用 JavaScript 清除 cookies/storage（CDP 模式兼容）
+    2. 尝试点击退出按钮
+    3. 所有操作都有超时保护
+
+    Args:
+        page: Playwright page
+        timeout: 整体超时时间（秒）
     """
     logger.info("正在退出 ChatGPT 登录...")
 
     try:
-        # 先导航到 ChatGPT 首页
-        await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(2)
+        # 设置整体超时
+        start_time = time.time()
 
-        # 方法1：尝试点击用户菜单退出
+        def check_timeout():
+            if time.time() - start_time > timeout:
+                raise TimeoutError(f"退出登录超时 ({timeout}s)")
+
+        # 先导航到 ChatGPT 首页
         try:
-            # 点击用户头像/菜单按钮（通常在右上角）
+            await asyncio.wait_for(
+                page.goto("https://chatgpt.com", wait_until="domcontentloaded"),
+                timeout=15
+            )
+        except asyncio.TimeoutError:
+            logger.warning("导航超时，继续尝试清除登录状态...")
+        await asyncio.sleep(1)
+        check_timeout()
+
+        # 方法1（CDP 兼容）：使用 JavaScript 清除所有存储
+        try:
+            logger.debug("尝试 JavaScript 清除存储...")
+            await page.evaluate("""() => {
+                // 清除 localStorage
+                try { localStorage.clear(); } catch(e) {}
+                // 清除 sessionStorage
+                try { sessionStorage.clear(); } catch(e) {}
+                // 清除 cookies (通过 document.cookie)
+                try {
+                    document.cookie.split(';').forEach(cookie => {
+                        const name = cookie.split('=')[0].trim();
+                        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';
+                        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=.chatgpt.com';
+                        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=.openai.com';
+                    });
+                } catch(e) {}
+            }""")
+            logger.info("✓ 已通过 JavaScript 清除存储")
+        except Exception as e:
+            logger.debug(f"JavaScript 清除存储失败: {e}")
+        check_timeout()
+
+        # 方法2：尝试点击用户菜单退出
+        try:
+            # 点击用户头像/菜单按钮
             user_menu = await page.query_selector('[data-testid="profile-button"], [aria-label*="profile"], button[class*="avatar"]')
             if user_menu:
                 await user_menu.click()
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
                 # 点击退出登录选项
                 logout_btn = await page.query_selector('a:has-text("Log out"), button:has-text("Log out"), a:has-text("退出"), button:has-text("退出")')
                 if logout_btn:
                     await logout_btn.click()
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
                     logger.info("✓ 已点击退出登录按钮")
-                    return True
         except Exception as e:
             logger.debug(f"点击退出按钮失败: {e}")
+        check_timeout()
 
-        # 方法2：清除 cookies（更可靠）
+        # 方法3（后备）：尝试 context.clear_cookies（非 CDP 模式）
         try:
             context = page.context
-            await context.clear_cookies()
-            await page.reload()
-            await asyncio.sleep(2)
-            logger.info("✓ 已清除 Cookies 并刷新页面")
-            return True
+            await asyncio.wait_for(context.clear_cookies(), timeout=5)
+            logger.info("✓ 已清除 Context Cookies")
+        except asyncio.TimeoutError:
+            logger.debug("context.clear_cookies() 超时（CDP 模式正常）")
         except Exception as e:
-            logger.warning(f"清除 Cookies 失败: {e}")
+            logger.debug(f"清除 Cookies 失败: {e}")
+        check_timeout()
 
-        # 方法3：直接访问登出 URL
+        # 方法4：访问登出 URL
         try:
-            await page.goto("https://chatgpt.com/auth/logout", wait_until="domcontentloaded", timeout=10000)
-            await asyncio.sleep(2)
+            await asyncio.wait_for(
+                page.goto("https://chatgpt.com/auth/logout", wait_until="domcontentloaded"),
+                timeout=10
+            )
+            await asyncio.sleep(1)
             logger.info("✓ 已访问登出 URL")
-            return True
+        except asyncio.TimeoutError:
+            logger.debug("登出 URL 超时")
+        except Exception as e:
+            logger.debug(f"访问登出 URL 失败: {e}")
+
+        # 最后刷新页面确认
+        try:
+            await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=10000)
+            await asyncio.sleep(1)
         except:
             pass
 
-        logger.warning("退出登录可能未完全成功，建议手动检查")
-        return False
+        # 检查是否真的退出了
+        text = await page.evaluate("() => document.body?.innerText || ''")
+        if "log in" in text.lower() or "sign up" in text.lower() or "get started" in text.lower():
+            logger.info("✓ 确认已退出登录")
+            return True
+        else:
+            logger.warning("退出登录状态不确定，继续执行...")
+            return True  # 继续执行，后续会处理
 
+    except TimeoutError as e:
+        logger.error(f"退出登录超时: {e}")
+        return False
     except Exception as e:
         logger.error(f"退出登录失败: {e}")
         return False
+
+
+# ==================== 注册/登录 ====================
+
+def get_account_password(email: str) -> str:
+    """
+    获取账号密码（从数据库/邮箱池获取，如果没有则生成新密码）
+    """
+    # 1. 尝试从数据库获取
+    try:
+        from database import get_account_by_email
+        account = get_account_by_email(email)
+        if account and account.get('password'):
+            logger.info(f"从数据库获取密码: {email}")
+            return account['password']
+    except Exception as e:
+        logger.debug(f"数据库获取密码失败: {e}")
+
+    # 2. 尝试从邮箱池获取
+    try:
+        from email_pool import EmailPoolManager
+        pool = EmailPoolManager()
+        email_data = pool.get_by_address(email)
+        if email_data and email_data.get('password'):
+            logger.info(f"从邮箱池获取密码: {email}")
+            return email_data['password']
+    except Exception as e:
+        logger.debug(f"邮箱池获取密码失败: {e}")
+
+    # 3. 生成新密码
+    import string
+    chars = string.ascii_letters + string.digits + "!@#$%"
+    password = ''.join(random.choice(chars) for _ in range(16))
+    logger.info(f"生成新密码: {email}")
+    return password
+
+
+async def get_chatgpt_verification_code(email: str, max_retries: int = 30) -> Optional[str]:
+    """
+    获取 ChatGPT 登录验证码（从邮箱）
+    """
+    try:
+        email_manager = get_email_manager()
+        return email_manager.check_verification_code(
+            email=email,
+            max_retries=max_retries,
+            interval=3.0
+        )
+    except Exception as e:
+        logger.error(f"获取验证码失败: {e}")
+        return None
+
+
+async def handle_about_you_page(page, email: str = None) -> bool:
+    """
+    处理 about-you 确认年龄页面
+
+    Args:
+        page: Playwright page 对象
+        email: 邮箱地址，用于从邮箱池获取注册信息
+    """
+    logger.info("处理 about-you 页面...")
+
+    # 英文月份转数字
+    MONTH_TO_NUM = {
+        'January': '1', 'February': '2', 'March': '3', 'April': '4',
+        'May': '5', 'June': '6', 'July': '7', 'August': '8',
+        'September': '9', 'October': '10', 'November': '11', 'December': '12'
+    }
+
+    try:
+        # 尝试从邮箱池获取注册信息
+        full_name = "John Smith"
+        birth_year = str(datetime.now().year - random.randint(25, 35))
+        birth_month = str(random.randint(1, 12))
+        birth_day = str(random.randint(1, 28))
+
+        if email:
+            try:
+                from email_pool import EmailPoolManager
+                pool = EmailPoolManager()
+                email_info = pool.get_by_address(email)
+                if email_info:
+                    # 获取保存的注册信息
+                    first_name = email_info.get('first_name', 'John')
+                    last_name = email_info.get('last_name', 'Smith')
+                    full_name = f"{first_name} {last_name}"
+
+                    # 转换月份：英文 → 数字
+                    saved_month = email_info.get('birth_month', 'January')
+                    birth_month = MONTH_TO_NUM.get(saved_month, str(random.randint(1, 12)))
+
+                    birth_day = email_info.get('birth_day', str(random.randint(1, 28)))
+                    birth_year = email_info.get('birth_year', str(datetime.now().year - 30))
+
+                    logger.info(f"✓ 使用邮箱池注册信息: {full_name}, {birth_year}/{birth_month}/{birth_day}")
+            except Exception as e:
+                logger.warning(f"获取邮箱池信息失败，使用随机数据: {e}")
+
+        await asyncio.sleep(1)
+
+        # 填写全名
+        try:
+            name_input = page.get_by_role("textbox", name="全名")
+            if await name_input.count() > 0:
+                await name_input.fill(full_name)
+                logger.info(f"✓ 填写全名: {full_name}")
+                await asyncio.sleep(0.3)
+        except:
+            pass
+
+        # 填写生日（spinbutton 类型）
+        # 年份
+        try:
+            year_input = page.get_by_role("spinbutton", name="年")
+            if await year_input.count() > 0:
+                await year_input.fill(birth_year)
+            else:
+                year_input = await page.query_selector('input[name="year"]')
+                if year_input:
+                    await year_input.fill(birth_year)
+            await asyncio.sleep(0.2)
+        except:
+            pass
+
+        # 月份
+        try:
+            month_input = page.get_by_role("spinbutton", name="月")
+            if await month_input.count() > 0:
+                await month_input.fill(birth_month)
+            else:
+                month_input = await page.query_selector('input[name="month"]')
+                if month_input:
+                    await month_input.fill(birth_month)
+            await asyncio.sleep(0.2)
+        except:
+            pass
+
+        # 日期
+        try:
+            day_input = page.get_by_role("spinbutton", name="日")
+            if await day_input.count() > 0:
+                await day_input.fill(birth_day)
+            else:
+                day_input = await page.query_selector('input[name="day"]')
+                if day_input:
+                    await day_input.fill(birth_day)
+        except:
+            pass
+
+        await asyncio.sleep(0.5)
+
+        # 点击继续
+        continue_btn = await page.query_selector('button:has-text("Continue"), button:has-text("继续")')
+        if continue_btn:
+            await continue_btn.click()
+            await asyncio.sleep(2)
+
+        logger.info("✓ about-you 处理完成")
+        return True
+    except Exception as e:
+        logger.error(f"about-you 处理失败: {e}")
+        return False
+
+
+async def wait_for_page_change(page, original_url: str, original_text: str, timeout: int = 10) -> bool:
+    """等待页面变化（URL 或内容发生变化）"""
+    start = time.time()
+    while time.time() - start < timeout:
+        current_url = page.url
+        current_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
+        if current_url != original_url or current_text != original_text[:500]:
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def register_or_login_chatgpt(page, email: str, password: str, max_retries: int = 3) -> bool:
+    """
+    注册或登录 ChatGPT 账号（通过页面状态检测，不依赖数据库）
+
+    改进版本：
+    - 每个操作后等待页面变化确认
+    - 添加重试机制
+    - 更精确的状态检测
+    - 超时保护
+
+    流程：
+    1. 打开 veterans-claim 页面
+    2. 检测页面状态：已登录/未登录
+    3. 如未登录，点击登录按钮
+    4. 输入邮箱 → 继续
+    5. 根据页面判断：创建密码（新用户）/ 输入密码（已有用户）
+    6. 输入验证码（如需要）
+    7. 处理 about-you 页面（如需要）
+    """
+    logger.info(f"开始注册/登录: {email}")
+
+    for retry in range(max_retries):
+        if retry > 0:
+            logger.info(f"登录重试 {retry + 1}/{max_retries}...")
+            await asyncio.sleep(2)
+
+        try:
+            # 1. 打开 chatgpt.com 主页进行登录（而不是 veterans-claim）
+            current_url = page.url
+            already_on_auth_page = "auth.openai.com" in current_url or "auth0.openai.com" in current_url
+
+            if already_on_auth_page:
+                logger.info(f"步骤 1/7: 已在登录页面 ({current_url[:50]}...)")
+            elif "chatgpt.com" not in current_url or retry > 0:
+                logger.info("步骤 1/7: 打开 chatgpt.com 主页进行登录")
+                await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2)
+                await save_screenshot(page, "01_chatgpt_home")
+            else:
+                logger.info(f"步骤 1/7: 当前在 ChatGPT ({current_url[:50]}...)")
+
+            # 2. 检测是否已登录或在登录流程中
+            logger.info("步骤 2/7: 检测登录状态")
+
+            # 等待页面加载完成
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except:
+                pass
+
+            current_url = page.url
+            logger.info(f"当前 URL: {current_url}")
+
+            # 初始化变量
+            text = ""
+            has_login_button = False
+
+            # 如果已在 OpenAI 登录页面，直接跳到输入邮箱步骤
+            already_on_auth_page = "auth.openai.com" in current_url or "auth0.openai.com" in current_url
+            if already_on_auth_page:
+                logger.info("✓ 已在 OpenAI 登录页面，跳到输入邮箱步骤")
+                # 在 auth 页面时，不需要再检测其他状态，直接跳到输入邮箱
+            else:
+                # 在 chatgpt.com 主页检测登录状态
+                text = await page.evaluate("() => document.body?.innerText || ''")
+                text_lower = text.lower()
+
+                # 在主页检测登录状态
+                # 未登录标识：有登录/注册按钮
+                not_logged_in_signs = ["log in", "sign up", "登录", "免费注册", "get started"]
+                has_login_button = any(sign in text_lower for sign in not_logged_in_signs)
+
+                # ⚠️ 2025-12-31 修复：正确的登录状态检测
+                # 关键发现：未登录页面也有 "打开个人资料菜单" 按钮，不能用它判断已登录！
+                # 正确逻辑：有"登录"按钮 = 未登录，没有"登录"按钮 = 已登录
+                if has_login_button:
+                    logger.info("检测到登录按钮，需要执行登录流程")
+                else:
+                    # 没有登录按钮，再检查是否有聊天输入框（真正已登录的标志）
+                    try:
+                        # 真正已登录的标志：有聊天输入框或新建聊天按钮
+                        chat_input = await page.query_selector(
+                            'textarea[placeholder*="消息"], '
+                            'textarea[placeholder*="Message"], '
+                            'button[aria-label*="新对话"], '
+                            'button[aria-label*="New chat"]'
+                        )
+                        if chat_input:
+                            logger.info("✓ 检测到已登录（有聊天输入框），跳过登录")
+                            return True
+                    except:
+                        pass
+                    logger.warning(f"页面状态不明确 (retry {retry + 1})，等待后重试...")
+                    await asyncio.sleep(3)
+                    continue
+
+            # 3. 点击登录按钮（如果不在登录页面）
+            # ⚠️ 2025-12-31 修复：chatgpt.com 登录是弹窗（dialog），不是跳转页面
+            if not already_on_auth_page and has_login_button:
+                logger.info("步骤 3/7: 点击登录按钮")
+
+                login_clicked = False
+                for selector in [
+                    'button:has-text("登录")',
+                    'button:has-text("Log in")',
+                    'button:has-text("Sign in")',
+                    'a:has-text("Log in")',
+                    'button:has-text("Get started")',
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.count() > 0:
+                            await btn.click(timeout=5000)
+                            login_clicked = True
+                            logger.info(f"✓ 点击登录按钮: {selector}")
+                            break
+                    except:
+                        continue
+
+                if not login_clicked:
+                    logger.warning(f"未找到登录按钮 (retry {retry + 1})")
+                    continue
+
+                # 等待弹窗或页面变化
+                await asyncio.sleep(2)
+                await save_screenshot(page, "02_after_login_click")
+
+            # 4. 输入邮箱
+            # ⚠️ 2025-12-31 修复：优先检测弹窗（dialog），在弹窗内操作
+            logger.info("步骤 4/7: 输入邮箱")
+            await asyncio.sleep(1)
+
+            current_url = page.url
+            logger.info(f"当前页面 URL: {current_url}")
+
+            email_input = None
+            is_dialog = False
+
+            # 方式1：检测弹窗（chatgpt.com 主页登录会出现弹窗）
+            try:
+                dialog = page.locator("dialog")
+                if await dialog.count() > 0 and await dialog.is_visible():
+                    logger.info("✓ 检测到登录弹窗（dialog）")
+                    is_dialog = True
+                    # 在弹窗内查找邮箱输入框
+                    # 使用 get_by_role 更可靠
+                    email_input = dialog.get_by_role("textbox", name="电子邮件地址")
+                    if await email_input.count() == 0:
+                        # 回退到英文
+                        email_input = dialog.get_by_role("textbox", name="Email address")
+                    if await email_input.count() > 0:
+                        logger.info("✓ 在弹窗内找到邮箱输入框")
+            except Exception as e:
+                logger.debug(f"弹窗检测失败: {e}")
+
+            # 方式2：在 auth.openai.com 页面查找
+            if email_input is None or (hasattr(email_input, 'count') and await email_input.count() == 0):
+                logger.info("尝试在页面中查找邮箱输入框...")
+                for selector in [
+                    'input[type="email"]',
+                    'input[name="email"]',
+                    'input[name="username"]',
+                    'input[placeholder*="邮件"]',
+                    'input[placeholder*="email" i]',
+                ]:
+                    try:
+                        email_input = await page.wait_for_selector(selector, timeout=3000)
+                        if email_input:
+                            logger.info(f"✓ 找到邮箱输入框: {selector}")
+                            break
+                    except:
+                        continue
+
+            # 方式3：使用 get_by_role（最后尝试）
+            if email_input is None:
+                try:
+                    email_input = page.get_by_role("textbox", name="电子邮件地址")
+                    if await email_input.count() > 0:
+                        logger.info("✓ 通过 get_by_role 找到邮箱输入框")
+                except:
+                    pass
+
+            if email_input is None or (hasattr(email_input, 'count') and await email_input.count() == 0):
+                logger.error(f"未找到邮箱输入框 (retry {retry + 1})")
+                await save_screenshot(page, "error_no_email_input")
+                continue
+
+            # 填写邮箱
+            try:
+                await email_input.click()
+                await asyncio.sleep(0.3)
+                await email_input.fill(email)
+                await asyncio.sleep(0.5)
+                logger.info(f"✓ 输入邮箱: {email}")
+            except Exception as e:
+                logger.error(f"填写邮箱失败: {e}")
+                await save_screenshot(page, "error_fill_email")
+                continue
+
+            # 记录当前状态（用于检测页面变化）
+            pre_click_url = page.url
+            pre_click_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
+
+            # 点击继续按钮
+            continue_clicked = False
+
+            # 如果是弹窗，在弹窗内查找继续按钮
+            if is_dialog:
+                try:
+                    dialog = page.locator("dialog")
+                    continue_btn = dialog.get_by_role("button", name="继续")
+                    if await continue_btn.count() == 0:
+                        continue_btn = dialog.get_by_role("button", name="Continue")
+                    if await continue_btn.count() > 0:
+                        await continue_btn.click()
+                        continue_clicked = True
+                        logger.info("✓ 在弹窗内点击继续按钮")
+                except Exception as e:
+                    logger.debug(f"弹窗内继续按钮失败: {e}")
+
+            # 回退：在页面中查找继续按钮
+            if not continue_clicked:
+                for btn_selector in [
+                    'button:has-text("继续")',
+                    'button:has-text("Continue")',
+                    'button[type="submit"]',
+                ]:
+                    try:
+                        continue_btn = page.locator(btn_selector).first
+                        if await continue_btn.count() > 0 and await continue_btn.is_enabled():
+                            await continue_btn.click()
+                            continue_clicked = True
+                            logger.info(f"✓ 点击继续按钮: {btn_selector}")
+                            break
+                    except:
+                        continue
+
+            if not continue_clicked:
+                logger.warning("未找到可点击的继续按钮，尝试按 Enter")
+                try:
+                    await email_input.press("Enter")
+                except:
+                    pass
+
+            # 等待页面变化
+            await wait_for_page_change(page, pre_click_url, pre_click_text, timeout=15)
+            await asyncio.sleep(2)
+
+            await save_screenshot(page, "03_after_email")
+
+            # 5. 检测页面状态：创建密码/输入密码
+            logger.info("步骤 5/7: 处理密码")
+
+            # 等待页面加载
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except:
+                pass
+            await asyncio.sleep(1)
+
+            current_url = page.url
+            logger.info(f"密码页面 URL: {current_url}")
+            page_text = await page.evaluate("() => document.body?.innerText || ''")
+
+            # 尝试找密码输入框
+            password_input = None
+            for selector in [
+                'input[type="password"]',
+                'input[name="password"]',
+                'input[autocomplete="new-password"]',
+                'input[autocomplete="current-password"]',
+            ]:
+                try:
+                    password_input = await page.wait_for_selector(selector, timeout=5000)
+                    if password_input:
+                        logger.info(f"✓ 找到密码输入框: {selector}")
+                        break
+                except:
+                    continue
+
+            if password_input:
+                if "创建密码" in page_text or "Create password" in page_text or "create a password" in page_text.lower() or "创建帐户" in page_text:
+                    logger.info("新用户，创建密码")
+                else:
+                    logger.info("已有用户，输入密码")
+
+                await password_input.click()
+                await asyncio.sleep(0.3)
+                await password_input.fill(password)
+                await asyncio.sleep(0.5)
+                logger.info(f"✓ 输入密码: {'*' * len(password)}")
+
+                # 记录当前状态
+                pre_click_url = page.url
+                pre_click_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
+
+                # 点击继续按钮
+                continue_clicked = False
+                for btn_selector in [
+                    'button:has-text("继续")',
+                    'button:has-text("Continue")',
+                    'button[type="submit"]',
+                ]:
+                    try:
+                        continue_btn = page.locator(btn_selector).first
+                        if await continue_btn.count() > 0 and await continue_btn.is_enabled():
+                            await continue_btn.click()
+                            continue_clicked = True
+                            logger.info(f"✓ 点击继续按钮: {btn_selector}")
+                            break
+                    except:
+                        continue
+
+                if not continue_clicked:
+                    logger.warning("未找到继续按钮，尝试按 Enter")
+                    await password_input.press("Enter")
+
+                await wait_for_page_change(page, pre_click_url, pre_click_text, timeout=15)
+                await asyncio.sleep(2)
+            else:
+                logger.info("未找到密码输入框，可能不需要密码（已有会话）")
+
+            await save_screenshot(page, "04_after_password")
+
+            # 6. 检测是否需要验证码
+            logger.info("步骤 6/7: 检测验证码需求")
+            page_text = await page.evaluate("() => document.body?.innerText || ''")
+            if "检查您的收件箱" in page_text or "Check your inbox" in page_text or "verify your email" in page_text.lower() or "enter the code" in page_text.lower():
+                logger.info("需要邮箱验证码，等待获取...")
+                code = await get_chatgpt_verification_code(email)
+                if code:
+                    logger.info(f"✓ 获取到验证码: {code}")
+                    # 查找验证码输入框
+                    code_input = None
+                    for selector in [
+                        'input[name="code"]',
+                        'input[autocomplete="one-time-code"]',
+                        'input[type="text"][maxlength="6"]',
+                        'input[type="text"]',
+                    ]:
+                        try:
+                            code_input = await page.query_selector(selector)
+                            if code_input:
+                                break
+                        except:
+                            continue
+
+                    if code_input:
+                        await code_input.fill(code)
+                        await asyncio.sleep(0.5)
+
+                        # 记录当前状态
+                        pre_click_url = page.url
+                        pre_click_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
+
+                        continue_btn = await page.query_selector(
+                            'button:has-text("继续"), button:has-text("Continue"), button[type="submit"]'
+                        )
+                        if continue_btn:
+                            await continue_btn.click()
+                            await wait_for_page_change(page, pre_click_url, pre_click_text, timeout=15)
+                            await asyncio.sleep(2)
+                else:
+                    logger.error("未能获取验证码")
+                    return False
+
+            await save_screenshot(page, "05_after_code")
+
+            # 7. 处理 about-you 页面（如果有）
+            logger.info("步骤 7/7: 检查 about-you 页面")
+            if "about-you" in page.url:
+                await handle_about_you_page(page, email)
+
+            # 8. 检查最终状态
+            await asyncio.sleep(2)
+            current_url = page.url
+
+            # 可能跳转到 OpenAI Platform，需要点击回到 ChatGPT
+            if "platform.openai.com" in current_url:
+                logger.info("跳转到 OpenAI Platform，尝试返回 ChatGPT...")
+                try:
+                    chatgpt_link = await page.query_selector('a:has-text("ChatGPT"), a:has-text("I\'m looking for ChatGPT")')
+                    if chatgpt_link:
+                        await chatgpt_link.click()
+                        await asyncio.sleep(3)
+                except:
+                    # 直接导航回去
+                    await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                    await asyncio.sleep(3)
+
+            await save_screenshot(page, "06_login_complete")
+            logger.info("✓ 登录流程完成")
+
+            # 保存密码到数据库（如果是新用户）
+            try:
+                from database import get_or_create_account
+                get_or_create_account(email, password)
+                logger.info("✓ 账号信息已保存到数据库")
+            except Exception as e:
+                logger.debug(f"保存账号信息跳过: {e}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"登录失败 (retry {retry + 1}): {e}")
+            import traceback
+            traceback.print_exc()
+            await save_screenshot(page, "error_login")
+
+    logger.error(f"登录失败，已重试 {max_retries} 次")
+    return False
 
 
 # ==================== 数据获取 ====================
@@ -792,7 +1557,7 @@ async def run_batch_verify(target_count: int = 1):
 
 # ==================== 主验证循环 ====================
 
-async def run_verify_loop(email: str, logout_after_success: bool = False, chatgpt_account: str = None):
+async def run_verify_loop(email: str, logout_after_success: bool = False, chatgpt_account: str = None, skip_login: bool = False):
     """
     运行验证循环
 
@@ -803,6 +1568,7 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
             - 全自动模式：email == chatgpt_account（同一个邮箱）
             - 半自动-脚本登录：用户的已有账号邮箱
             - 半自动-手动登录：用户手动登录的账号邮箱
+        skip_login: 跳过登录步骤（用户已手动登录时使用）
     """
     from playwright.async_api import async_playwright
 
@@ -849,27 +1615,68 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
 
             logger.info(f"当前页面: {page.url}")
 
-            # 检测是否有另一个账号登录着（需要先退出）
-            if await check_if_another_account_logged_in(page, email):
-                logger.info("检测到需要先退出登录...")
+            if skip_login:
+                # ========== 跳过登录（用户已手动登录）==========
+                logger.info("=" * 50)
+                logger.info("【手动登录模式】跳过登录步骤，直接进入验证流程")
+                logger.info("=" * 50)
+
+                # 直接导航到 veterans-claim
+                await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2)
+
+                # 验证是否已登录（更宽松的检测）
+                text = await page.evaluate("() => document.body?.innerText || ''")
+                text_lower = text.lower()
+
+                # 已登录的标志：有这些内容说明已登录
+                logged_in_signs = [
+                    "verify your eligibility",  # 验证页面
+                    "claim offer",              # 领取优惠
+                    "claim your offer",         # 领取优惠
+                    "you've been verified",     # 已验证
+                    "chatgpt plus",             # Plus 相关
+                    "veteran",                  # 退伍军人相关内容
+                ]
+
+                # 未登录的标志：有 log in 但没有任何已登录标志
+                has_login_button = "log in" in text_lower or "sign up" in text_lower
+                has_logged_in_sign = any(sign in text_lower for sign in logged_in_signs)
+
+                if has_login_button and not has_logged_in_sign:
+                    logger.error("检测到未登录状态！请先手动登录后再继续")
+                    logger.error("访问 https://chatgpt.com 登录后重试")
+                    return False
+
+                logger.info("✓ 检测到已登录状态，继续验证流程")
+                logger.info(f"  页面关键词: {[s for s in logged_in_signs if s in text_lower]}")
+
+            else:
+                # ========== 每次新任务都必须先退出登录 ==========
+                # 无论当前是谁登录着，都要先退出，然后用选择的邮箱登录
+                logger.info("【新任务】先退出当前登录...")
                 await logout_chatgpt(page)
                 await asyncio.sleep(2)
 
-            # 导航到 veterans-claim 页面
-            logger.info("导航到 veterans-claim 页面...")
-            await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
-            logger.info(f"导航后页面: {page.url}")
+                # ========== 用选择的邮箱登录/注册 ==========
+                logger.info(f"开始登录/注册: {email}")
+                password = get_account_password(email)
+                if not await register_or_login_chatgpt(page, email, password):
+                    logger.error("登录/注册失败")
+                    return False
 
-            # 再次检测登录状态（可能已经退出了）
-            state, _ = await detect_page_state(page)
-            if state == "please_login":
-                logger.error("需要登录！请先手动登录 ChatGPT")
-                return False
+                # 登录成功后导航到 veterans-claim
+                logger.info("导航到 veterans-claim 页面...")
+                await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                await asyncio.sleep(3)
+
+            logger.info(f"导航后页面: {page.url}")
 
             attempt = 0
             max_attempts = 50
             consecutive_failures = 0
+            verify_btn_failures = 0  # 验证按钮点击失败计数
+            unknown_state_count = 0  # 未知状态计数，防止一直刷新
             current_veteran = None
             already_approved_count = 0  # 跟踪 "already been approved" 出现次数
 
@@ -878,86 +1685,37 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                 state, message = await detect_page_state(page)
                 logger.info(f"[{attempt}] 状态: {state} - {message}")
 
-                # 成功（包括 Stripe 支付页面、Claim offer 页面）
-                if state in ["success", "success_stripe", "success_claim"]:
+                # ========== "You've been verified" - 验证成功！立即持久化 ==========
+                if state == "success":
                     logger.info("=" * 50)
-                    logger.info("🎉 验证成功！获得 1 年 ChatGPT Plus")
-                    logger.info(f"邮箱: {email}")
+                    logger.info("🎉 检测到 'You've been verified'，验证成功！")
+                    logger.info(f"接收邮箱: {email}")
                     if current_veteran:
                         logger.info(f"军人: {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})")
-                        logger.info(f"退伍日期: {current_veteran['discharge_month']} {current_veteran['discharge_day']}, {current_veteran['discharge_year']}")
-                    if state == "success_stripe":
-                        logger.info("已跳转到 Stripe 支付页面（$0.00 免费订阅）")
-                    elif state == "success_claim":
-                        logger.info("Claim offer 可用，验证已通过")
                     logger.info("=" * 50)
-                    await save_screenshot(page, "success")
+                    await save_screenshot(page, "verified_success")
 
-                    # 点击 Continue 按钮（仅在 SheerID 成功页面）
-                    if state == "success":
-                        try:
-                            continue_btn = await page.query_selector('button:has-text("Continue")')
-                            if continue_btn:
-                                await continue_btn.click()
-                                logger.info("已点击 Continue 按钮")
-                                await asyncio.sleep(3)
-                        except Exception as e:
-                            logger.debug(f"点击 Continue 跳过: {e}")
+                    # ========== 立即持久化（不依赖 Stripe 页面）==========
+                    real_account = email  # CDP 手动模式：接收邮箱就是登录账号
+                    password_used = get_account_password(real_account)
 
-                    # ========== 检测真实登录账号 ==========
-                    # 验证成功后，Plus 给的是登录的账号，不是接收邮箱
-                    # 需要检测真实登录的账号是谁
-                    logged_in_account = await get_logged_in_account(page)
-                    if logged_in_account:
-                        logger.info(f"✓ 真实验证通过账号: {logged_in_account}")
-                        if logged_in_account.lower() != email.lower():
-                            logger.info(f"  → 接收邮箱 {email} 只是消耗品")
-                    else:
-                        logged_in_account = email  # 回退到接收邮箱
-                        logger.warning(f"未能检测到登录账号，使用接收邮箱: {email}")
+                    logger.info("持久化验证成功信息...")
 
-                    # 确定真实账号和消耗邮箱
-                    real_account = logged_in_account
-                    consumed_email = email if email.lower() != logged_in_account.lower() else None
-
-                    # 保存验证成功信息到数据库
+                    # 1. 更新数据库
                     try:
-                        from database import update_account, update_verification, get_account_by_email, create_account
+                        from database import update_account, update_verification, get_or_create_account
+                        get_or_create_account(real_account, password_used)
+                        update_account(real_account, status="verified")
+                        logger.info(f"✓ 数据库: {real_account} → verified")
 
-                        # 1. 确保真实账号存在于数据库
-                        account = get_account_by_email(real_account)
-                        if not account:
-                            # 如果真实账号不存在，创建一个（半自动模式可能是自有邮箱）
-                            logger.info(f"真实账号 {real_account} 不在数据库，创建记录")
-                            create_account(
-                                email=real_account,
-                                password="(自有账号)",  # 自有邮箱没有密码记录
-                                status="verified"
-                            )
-
-                        # 2. 更新真实账号状态为已验证 + 记录消耗的临时邮箱
-                        update_account(real_account, status="verified", consumed_email=consumed_email)
-
-                        # 3. 更新验证记录状态为 success
                         if current_veteran and current_veteran.get('verification_id'):
                             v_id = current_veteran['verification_id']
                             update_verification(v_id, status='success')
-                            logger.info(f"✓ 验证记录已更新: verification #{v_id} → success")
-                            logger.info(f"  军人: {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})")
-
-                        # 4. 保存成功信息到账号备注
-                        note = f"验证成功 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                        if current_veteran:
-                            note += f" | {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})"
-                        if consumed_email:
-                            note += f" | 消耗邮箱: {consumed_email}"
-                        update_account(real_account, note=note)
-                        logger.info("✓ 数据库状态已更新")
-
+                            logger.info(f"✓ 验证记录 #{v_id} → success")
                     except Exception as e:
                         logger.error(f"✗ 数据库更新失败: {e}")
 
-                    # 更新邮箱池状态
+                    # 2. 更新邮箱池状态
                     try:
                         from email_pool import EmailPoolManager
                         pool = EmailPoolManager()
@@ -969,24 +1727,183 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                                 'branch': current_veteran['branch'],
                                 'discharge_date': f"{current_veteran['discharge_month']} {current_veteran['discharge_day']}, {current_veteran['discharge_year']}"
                             }
+                        pool.mark_verified(email, veteran_info=veteran_info)
+                        pool.update_password(email, password_used)
+                        logger.info(f"✓ 邮箱池: {email} → verified")
+                    except Exception as e:
+                        logger.error(f"✗ 邮箱池更新失败: {e}")
 
-                        # 根据情况更新邮箱池状态
-                        if consumed_email:
-                            # 接收邮箱是消耗品，标记为 consumed
-                            pool.mark_consumed(consumed_email, consumed_by=real_account, veteran_info=veteran_info)
-                            logger.info(f"✓ 接收邮箱 {consumed_email} 已标记为 consumed（消耗品）")
+                    logger.info("=" * 40)
+                    logger.info("🎉 验证成功账号信息:")
+                    logger.info(f"   账号: {real_account}")
+                    logger.info(f"   密码: {password_used}")
+                    if current_veteran:
+                        logger.info(f"   军人: {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})")
+                    logger.info("=" * 40)
 
-                            # 真实账号如果在邮箱池中，标记为 verified
-                            if pool.get_by_address(real_account):
-                                pool.mark_verified(real_account, veteran_info=veteran_info)
-                                logger.info(f"✓ 真实账号 {real_account} 已标记为 verified")
+                    # 尝试点击 Continue 继续领取（但已经持久化了，失败也没关系）
+                    logger.info("尝试点击 Continue 领取 Plus...")
+                    try:
+                        continue_btn = await page.query_selector('button:has-text("Continue"), a:has-text("Continue")')
+                        if continue_btn:
+                            await continue_btn.click()
+                            logger.info("✓ 已点击 Continue")
+                            await asyncio.sleep(5)
                         else:
-                            # 接收邮箱就是真实账号（全自动模式）
-                            pool.mark_verified(email, veteran_info=veteran_info)
-                            logger.info("✓ 邮箱池状态已更新（含军人信息）")
+                            logger.warning("未找到 Continue 按钮")
+                    except Exception as e:
+                        logger.warning(f"点击 Continue 失败: {e}")
+
+                    # ========== 验证成功，直接返回！不需要等 Stripe ==========
+                    logger.info("✓ 验证成功完成，返回成功状态")
+                    return True
+
+                # ========== Claim offer 状态 - 已验证成功，有领取按钮 ==========
+                if state == "success_claim":
+                    logger.info("=" * 50)
+                    logger.info("🎉 检测到 Claim offer 按钮，验证已成功！")
+                    logger.info(f"接收邮箱: {email}")
+                    if current_veteran:
+                        logger.info(f"军人: {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})")
+                    logger.info("=" * 50)
+                    await save_screenshot(page, "claim_offer_success")
+
+                    # ========== 立即持久化（与 success 状态相同）==========
+                    real_account = email
+                    password_used = get_account_password(real_account)
+                    logger.info("持久化验证成功信息...")
+
+                    try:
+                        from database import update_account, get_or_create_account
+                        get_or_create_account(real_account, password_used)
+                        update_account(real_account, status="verified")
+                        logger.info(f"✓ 数据库: {real_account} → verified")
+                    except Exception as e:
+                        logger.error(f"✗ 数据库更新失败: {e}")
+
+                    try:
+                        from email_pool import EmailPoolManager
+                        pool = EmailPoolManager()
+                        veteran_info = None
+                        if current_veteran:
+                            veteran_info = {
+                                'first_name': current_veteran['first_name'],
+                                'last_name': current_veteran['last_name'],
+                                'branch': current_veteran['branch'],
+                                'discharge_date': f"{current_veteran['discharge_month']} {current_veteran['discharge_day']}, {current_veteran['discharge_year']}"
+                            }
+                        pool.mark_verified(email, veteran_info=veteran_info)
+                        pool.update_password(email, password_used)
+                        logger.info(f"✓ 邮箱池: {email} → verified")
+                    except Exception as e:
+                        logger.error(f"✗ 邮箱池更新失败: {e}")
+
+                    # 尝试点击 Claim offer（可选，已持久化）
+                    try:
+                        claim_btn = await page.query_selector('button:has-text("Claim offer")')
+                        if claim_btn:
+                            await claim_btn.click()
+                            logger.info("✓ 已点击 Claim offer")
+                            await asyncio.sleep(3)
+                    except Exception as e:
+                        logger.warning(f"点击 Claim offer 失败: {e}")
+
+                    logger.info("✓ 验证成功完成，返回成功状态")
+                    return True
+
+                # ========== Stripe 支付页面 - 真正完成！==========
+                if state == "success_stripe":
+                    logger.info("=" * 50)
+                    logger.info("🎉 验证成功！已跳转到 Stripe 支付页面")
+                    logger.info(f"接收邮箱: {email}")
+                    if current_veteran:
+                        logger.info(f"军人: {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})")
+                    logger.info("=" * 50)
+                    await save_screenshot(page, "success_stripe")
+
+                    # ========== 检测真实登录账号 ==========
+                    # Plus 给的是登录账号，不一定是接收邮箱
+                    logged_in_account = await get_logged_in_account(page)
+                    if logged_in_account:
+                        real_account = logged_in_account
+                        logger.info(f"✓ 检测到登录账号: {real_account}")
+                    else:
+                        real_account = email  # 回退到接收邮箱
+                        logger.warning(f"未能检测登录账号，使用接收邮箱: {email}")
+
+                    # 判断是否消耗了临时邮箱
+                    consumed_email = email if email.lower() != real_account.lower() else None
+                    if consumed_email:
+                        logger.info(f"   消耗的临时邮箱: {consumed_email}")
+
+                    password_used = get_account_password(real_account)
+
+                    logger.info("=" * 40)
+                    logger.info("持久化验证成功信息...")
+
+                    # 1. 更新数据库
+                    try:
+                        from database import update_account, update_verification, get_or_create_account
+
+                        # 确保账号存在并更新状态
+                        get_or_create_account(real_account, password_used)
+                        update_account(real_account, status="verified", consumed_email=consumed_email)
+                        logger.info(f"✓ 数据库: {real_account} → verified")
+
+                        # 更新验证记录
+                        if current_veteran and current_veteran.get('verification_id'):
+                            v_id = current_veteran['verification_id']
+                            update_verification(v_id, status='success')
+                            logger.info(f"✓ 验证记录 #{v_id} → success")
 
                     except Exception as e:
-                        logger.debug(f"邮箱池更新跳过: {e}")
+                        logger.error(f"✗ 数据库更新失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                    # 2. 更新邮箱池状态
+                    try:
+                        from email_pool import EmailPoolManager
+                        pool = EmailPoolManager()
+
+                        veteran_info = None
+                        if current_veteran:
+                            veteran_info = {
+                                'first_name': current_veteran['first_name'],
+                                'last_name': current_veteran['last_name'],
+                                'branch': current_veteran['branch'],
+                                'discharge_date': f"{current_veteran['discharge_month']} {current_veteran['discharge_day']}, {current_veteran['discharge_year']}"
+                            }
+
+                        if consumed_email:
+                            # 半自动模式：接收邮箱标记为 consumed
+                            pool.mark_consumed(consumed_email, consumed_by=real_account, veteran_info=veteran_info)
+                            logger.info(f"✓ 邮箱池: {consumed_email} → consumed (by {real_account})")
+                            # 真实账号如果在邮箱池中也标记为 verified
+                            if pool.get_by_address(real_account):
+                                pool.mark_verified(real_account, veteran_info=veteran_info)
+                                pool.update_password(real_account, password_used)
+                        else:
+                            # 全自动模式：接收邮箱就是真实账号
+                            pool.mark_verified(email, veteran_info=veteran_info)
+                            pool.update_password(email, password_used)
+                            logger.info(f"✓ 邮箱池: {email} → verified")
+
+                    except Exception as e:
+                        logger.error(f"✗ 邮箱池更新失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                    # 3. 打印成功信息
+                    logger.info("=" * 40)
+                    logger.info("🎉 验证成功账号信息:")
+                    logger.info(f"   账号: {real_account}")
+                    logger.info(f"   密码: {password_used}")
+                    if consumed_email:
+                        logger.info(f"   消耗邮箱: {consumed_email}")
+                    if current_veteran:
+                        logger.info(f"   军人: {current_veteran['first_name']} {current_veteran['last_name']} ({current_veteran['branch']})")
+                    logger.info("=" * 40)
 
                     # 根据参数决定是否退出登录
                     if logout_after_success:
@@ -1032,10 +1949,18 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                     await asyncio.sleep(3)
                     continue
 
-                # 需要登录
+                # 需要登录 → 自动登录
                 if state == "please_login":
-                    logger.error("需要登录！请手动登录 ChatGPT")
-                    return False
+                    logger.info("检测到需要登录，开始自动登录...")
+                    password = get_account_password(email)
+                    if await register_or_login_chatgpt(page, email, password):
+                        logger.info("✓ 自动登录成功")
+                        await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.error("自动登录失败")
+                        return False
+                    continue
 
                 # Stripe 支付页面（上一个账号的成功状态，需要退出登录）
                 if state == "stripe_page":
@@ -1050,16 +1975,54 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                 if state in ["veterans_claim", "veterans_claim_check"]:
                     clicked = await click_verify_button(page)
                     if not clicked:
-                        # 按钮点击失败，可能需要退出登录或刷新页面
-                        logger.warning("验证按钮点击失败，尝试刷新页面...")
-                        await page.reload()
+                        verify_btn_failures += 1
+                        logger.warning(f"验证按钮点击失败 ({verify_btn_failures}/3)")
+
+                        if verify_btn_failures >= 3:
+                            # 连续3次找不到验证按钮，可能是已验证账号，尝试退出登录
+                            logger.warning("连续3次找不到验证按钮，当前账号可能已验证，尝试退出登录...")
+                            await logout_chatgpt(page)
+                            verify_btn_failures = 0
+                            await asyncio.sleep(2)
+                            await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        else:
+                            await page.reload()
+                    else:
+                        verify_btn_failures = 0  # 成功后重置计数
                     await asyncio.sleep(3)
+                    continue
+
+                # veterans-claim 页面但未登录 → 自动登录
+                if state == "veterans_claim_not_logged_in":
+                    logger.info("检测到未登录状态，开始自动登录...")
+                    password = get_account_password(email)
+                    if await register_or_login_chatgpt(page, email, password):
+                        logger.info("✓ 自动登录成功")
+                        # 登录成功后导航回 veterans-claim
+                        await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.error("自动登录失败")
+                        return False
                     continue
 
                 # ChatGPT 首页
                 if state == "chatgpt_home":
                     await page.goto(VETERANS_CLAIM_URL)
                     await asyncio.sleep(3)
+                    continue
+
+                # OpenAI 登录页面 - 继续登录流程
+                if state == "auth_page":
+                    logger.info("检测到在登录页面，继续登录流程...")
+                    password = get_account_password(email)
+                    if await register_or_login_chatgpt(page, email, password):
+                        logger.info("✓ 登录成功")
+                        await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.error("登录失败")
+                        return False
                     continue
 
                 # SheerID 表单
@@ -1143,17 +2106,50 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                 # SheerID 未知状态 - 可能是表单页面但没识别出来
                 if state == "sheerid_unknown":
                     logger.info(f"SheerID 未知状态，尝试刷新并识别: {message}")
-                    await asyncio.sleep(3)
-                    await page.reload()
+                    unknown_state_count += 1
+                    if unknown_state_count >= 5:
+                        logger.warning("SheerID 页面连续 5 次未识别，尝试返回 veterans-claim...")
+                        await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        unknown_state_count = 0
+                    else:
+                        await asyncio.sleep(3)
+                        await page.reload()
                     await asyncio.sleep(3)
                     continue
 
-                # 未知状态 - 等待并刷新
-                logger.warning(f"未知状态，等待 5 秒后刷新: {message[:100]}")
-                await save_screenshot(page, "unknown")
-                await asyncio.sleep(5)
-                await page.reload()
-                await asyncio.sleep(3)
+                # 未知状态处理
+                unknown_state_count += 1
+                logger.warning(f"未知状态 ({unknown_state_count}/5): {message[:100]}")
+                await save_screenshot(page, f"unknown_{unknown_state_count}")
+
+                if unknown_state_count >= 5:
+                    # 连续 5 次未知状态，尝试重新登录
+                    logger.error("连续 5 次未知状态，尝试重新登录...")
+                    unknown_state_count = 0
+
+                    # 先导航到 veterans-claim 检测状态
+                    await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                    await asyncio.sleep(3)
+
+                    # 检测是否已登录
+                    text = await page.evaluate("() => document.body?.innerText || ''")
+                    text_lower = text.lower()
+
+                    if "log in" in text_lower and "verify your eligibility" not in text_lower:
+                        # 未登录，重新登录
+                        logger.info("检测到未登录，重新登录...")
+                        password = get_account_password(email)
+                        if not await register_or_login_chatgpt(page, email, password):
+                            logger.error("重新登录失败")
+                            return False
+                        await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                else:
+                    # 等待后刷新
+                    await asyncio.sleep(3)
+                    await page.reload()
+                    await asyncio.sleep(3)
+                continue
 
             logger.error(f"超过最大尝试次数 ({max_attempts})")
             return False
@@ -1216,6 +2212,7 @@ def main():
     parser.add_argument("--account", "-a", help="ChatGPT 账号邮箱（半自动模式：记录是哪个账号使用了这个临时邮箱）")
     parser.add_argument("--batch", "-b", type=int, metavar="N", help="批量模式：验证成功 N 个后停止")
     parser.add_argument("--cdp", default=CDP_URL, help=f"CDP URL (默认: {CDP_URL})")
+    parser.add_argument("--skip-login", action="store_true", help="跳过登录步骤（用户已手动登录）")
     parser.add_argument("--test", action="store_true", help="测试模式")
     parser.add_argument("--data", metavar="EMAIL", help="只获取表单数据")
     parser.add_argument("--stats", action="store_true", help="显示统计")
@@ -1296,10 +2293,17 @@ def main():
     print()
     print("请确保:")
     print("  1. 已运行 scripts/start-chrome-devtools.bat")
-    print("  2. 已在 Chrome 中登录 ChatGPT")
+    if args.skip_login:
+        print("  2. 已在 Chrome 中手动登录 ChatGPT（跳过登录模式）")
+    else:
+        print("  2. 已在 Chrome 中登录 ChatGPT")
     print()
 
-    success = asyncio.run(run_verify_loop(args.email, chatgpt_account=args.account))
+    success = asyncio.run(run_verify_loop(
+        args.email,
+        chatgpt_account=args.account,
+        skip_login=args.skip_login
+    ))
     sys.exit(0 if success else 1)
 
 
