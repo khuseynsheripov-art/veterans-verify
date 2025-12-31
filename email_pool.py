@@ -7,8 +7,10 @@ Veterans Verify - 邮箱池管理
 2. 持久化存储（data/email_pool.json）
 3. 状态管理：available | in_use | verified | failed
 4. 选择/使用邮箱
+5. 存储注册信息（姓名、生日）用于重新登录
 """
 import json
+import random
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -17,8 +19,27 @@ from enum import Enum
 import logging
 
 from email_manager import EmailManager
+from automation.config import generate_password
 
 logger = logging.getLogger(__name__)
+
+# 随机姓名列表
+FIRST_NAMES = ['James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph', 'Thomas', 'Charles',
+               'Mary', 'Patricia', 'Jennifer', 'Linda', 'Elizabeth', 'Barbara', 'Susan', 'Jessica', 'Sarah', 'Karen']
+LAST_NAMES = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez',
+              'Wilson', 'Anderson', 'Taylor', 'Thomas', 'Moore', 'Jackson', 'Martin', 'Lee', 'Thompson', 'White']
+MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+
+def generate_random_profile() -> Dict:
+    """生成随机的注册信息（姓名、生日）"""
+    return {
+        'first_name': random.choice(FIRST_NAMES),
+        'last_name': random.choice(LAST_NAMES),
+        'birth_month': random.choice(MONTHS),
+        'birth_day': str(random.randint(1, 28)),
+        'birth_year': str(random.randint(1970, 2000))
+    }
 
 
 class EmailStatus(str, Enum):
@@ -81,20 +102,33 @@ class EmailPoolManager:
         for i in range(count):
             jwt, address = email_manager.create_email()
             if jwt and address:
+                # 生成随机注册信息
+                profile = generate_random_profile()
+
+                # 生成 ChatGPT 登录密码
+                password = generate_password()
+
                 email_data = {
                     'address': address,
                     'jwt': jwt,
+                    'password': password,  # ChatGPT 登录密码（创建时生成，保持一致）
                     'status': EmailStatus.AVAILABLE.value,
                     'linked_account': None,  # 关联的 ChatGPT 账号
                     'created_at': datetime.now().isoformat(),
                     'used_at': None,
                     'verified_at': None,
-                    'error_message': None
+                    'error_message': None,
+                    # 注册信息（ChatGPT 注册时使用，保持一致）
+                    'first_name': profile['first_name'],
+                    'last_name': profile['last_name'],
+                    'birth_month': profile['birth_month'],
+                    'birth_day': profile['birth_day'],
+                    'birth_year': profile['birth_year']
                 }
                 with self._lock:
                     self._pool.append(email_data)
                 created.append(email_data)
-                logger.info(f"[EmailPool] 创建邮箱 {i+1}/{count}: {address}")
+                logger.info(f"[EmailPool] 创建邮箱 {i+1}/{count}: {address} ({profile['first_name']} {profile['last_name']})")
             else:
                 logger.warning(f"[EmailPool] 创建邮箱 {i+1}/{count} 失败")
 
@@ -187,6 +221,45 @@ class EmailPoolManager:
                     if veteran_info:
                         email['verified_veteran'] = veteran_info
                     self._save()
+                    return True
+        return False
+
+    def update_password(self, address: str, password: str) -> bool:
+        """保存账号密码到邮箱池"""
+        with self._lock:
+            for email in self._pool:
+                if email['address'] == address:
+                    email['password'] = password
+                    self._save()
+                    return True
+        return False
+
+    def update_profile(self, address: str, first_name: str, last_name: str,
+                       birth_month: str, birth_day: str, birth_year: str) -> bool:
+        """
+        更新邮箱的注册信息（用于手动修改注册时填写的姓名/生日）
+
+        Args:
+            address: 邮箱地址
+            first_name: 名
+            last_name: 姓
+            birth_month: 出生月 (如 "September")
+            birth_day: 出生日 (如 "25")
+            birth_year: 出生年 (如 "1999")
+
+        Returns:
+            是否成功
+        """
+        with self._lock:
+            for email in self._pool:
+                if email['address'] == address:
+                    email['first_name'] = first_name
+                    email['last_name'] = last_name
+                    email['birth_month'] = birth_month
+                    email['birth_day'] = birth_day
+                    email['birth_year'] = birth_year
+                    self._save()
+                    logger.info(f"[EmailPool] 更新注册信息: {address} -> {first_name} {last_name}")
                     return True
         return False
 
@@ -293,6 +366,44 @@ class EmailPoolManager:
                     stats[status] += 1
             return stats
 
+    def ensure_password(self, address: str) -> Optional[str]:
+        """
+        确保邮箱有密码，如果没有则生成一个
+
+        用于修复旧数据（创建时没有生成密码的邮箱）
+
+        Returns:
+            密码字符串，或 None（如果邮箱不存在）
+        """
+        with self._lock:
+            for email in self._pool:
+                if email['address'] == address:
+                    if not email.get('password'):
+                        # 生成并保存密码
+                        email['password'] = generate_password()
+                        self._save()
+                        logger.info(f"[EmailPool] 为 {address} 生成密码")
+                    return email['password']
+        return None
+
+    def migrate_add_passwords(self) -> int:
+        """
+        迁移：为所有没有密码的邮箱生成密码
+
+        Returns:
+            修复的邮箱数量
+        """
+        count = 0
+        with self._lock:
+            for email in self._pool:
+                if not email.get('password'):
+                    email['password'] = generate_password()
+                    count += 1
+                    logger.info(f"[EmailPool] 迁移: 为 {email['address']} 生成密码")
+            if count > 0:
+                self._save()
+        return count
+
     def add_external(self, address: str, jwt: str) -> bool:
         """
         添加外部邮箱（用于半自动模式）
@@ -330,3 +441,46 @@ class EmailPoolManager:
             self._pool.append(email_data)
             self._save()
             return True
+
+    def sync_from_database(self) -> int:
+        """
+        从数据库同步状态到邮箱池
+
+        解决问题：验证成功后数据库更新了，但邮箱池没更新
+        这个方法会检查数据库中的 verified 账号，同步到邮箱池
+
+        Returns:
+            同步的邮箱数量
+        """
+        try:
+            from database import get_accounts
+            accounts = get_accounts()
+        except Exception as e:
+            logger.error(f"[EmailPool] 同步失败，无法读取数据库: {e}")
+            return 0
+
+        count = 0
+        with self._lock:
+            for account in accounts:
+                email = account.get('email', '')
+                status = account.get('status', '')
+
+                # 只同步 verified 状态
+                if status != 'verified':
+                    continue
+
+                # 查找邮箱池中的记录
+                for pool_email in self._pool:
+                    if pool_email['address'] == email:
+                        if pool_email['status'] != EmailStatus.VERIFIED.value:
+                            pool_email['status'] = EmailStatus.VERIFIED.value
+                            pool_email['verified_at'] = datetime.now().isoformat()
+                            count += 1
+                            logger.info(f"[EmailPool] 同步: {email} → verified")
+                        break
+
+            if count > 0:
+                self._save()
+
+        logger.info(f"[EmailPool] 同步完成，更新了 {count} 个邮箱状态")
+        return count

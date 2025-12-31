@@ -52,3 +52,5 @@ build/
 **/备份.env
 上次会话记录.md
 CLAUDE.md
+profiles/
+.env.env.backup

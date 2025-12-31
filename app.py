@@ -33,6 +33,7 @@ if env_file.exists():
     load_dotenv(env_file, override=True)
 
 from config import Config, setup_logging
+from proxy_manager import parse_proxy_format  # 代理格式解析
 
 # 初始化日志
 setup_logging()
@@ -45,9 +46,96 @@ logger = logging.getLogger(__name__)
 # Flask 应用
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+# Session Cookie 配置（确保 POST 请求也发送 cookie）
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = False  # 本地开发不需要 HTTPS
 
 # 配置
 config = Config()
+
+# 代理池管理器（全局单例）
+_proxy_manager = None
+
+def get_proxy_manager():
+    """获取代理池管理器（懒加载）"""
+    global _proxy_manager
+    if _proxy_manager is None and config.has_proxy_pool():
+        from proxy_manager import ProxyManager
+        _proxy_manager = ProxyManager(
+            proxy_list=config.get_proxy_list(),
+            strategy=config.get_proxy_strategy(),
+            bad_proxy_ttl=config.get_proxy_bad_ttl()
+        )
+    return _proxy_manager
+
+
+def get_proxy_for_task(mode: str = 'camoufox') -> Optional[str]:
+    """
+    为任务获取代理（智能策略）
+
+    Args:
+        mode: 'cdp' 或 'camoufox'
+
+    Returns:
+        代理字符串，无代理返回 None
+    """
+    proxy_mode = config.get_proxy_mode()
+
+    # CDP 模式：不使用代理（浏览器插件处理）
+    if mode == 'cdp':
+        logger.info(f"[Proxy] CDP 模式 - 不设置代理（由浏览器插件管理）")
+        return None
+
+    # Camoufox 模式：根据 proxy_mode 决定策略
+    if mode == 'camoufox':
+        # 策略 1: main_only - 只使用主代理
+        if proxy_mode == 'main_only':
+            main_proxy = config.get_proxy_server()
+            if main_proxy:
+                logger.info(f"[Proxy] 使用主代理（main_only 模式）")
+                return main_proxy
+            logger.warning(f"[Proxy] main_only 模式但未配置主代理")
+            return None
+
+        # 策略 2: pool_only - 只使用代理池
+        elif proxy_mode == 'pool_only':
+            proxy_manager = get_proxy_manager()
+            if proxy_manager:
+                proxy = proxy_manager.get_proxy()
+                if proxy:
+                    logger.info(f"[Proxy] 使用代理池")
+                    return proxy
+                logger.warning(f"[Proxy] 代理池为空，使用直连")
+                return None
+            logger.warning(f"[Proxy] pool_only 模式但未配置代理池")
+            return None
+
+        # 策略 3: pool_with_fallback - 代理池优先，失败时用主代理（推荐）
+        else:  # pool_with_fallback
+            proxy_manager = get_proxy_manager()
+            if proxy_manager:
+                proxy = proxy_manager.get_proxy()
+                if proxy:
+                    logger.info(f"[Proxy] 使用代理池（优先）")
+                    return proxy
+                else:
+                    # 代理池失败，fallback 到主代理
+                    main_proxy = config.get_proxy_server()
+                    if main_proxy:
+                        logger.warning(f"[Proxy] 代理池为空，切换到主代理（fallback）")
+                        return main_proxy
+                    logger.warning(f"[Proxy] 代理池和主代理均为空，使用直连")
+                    return None
+            else:
+                # 没有代理池，直接用主代理
+                main_proxy = config.get_proxy_server()
+                if main_proxy:
+                    logger.info(f"[Proxy] 未配置代理池，使用主代理")
+                    return main_proxy
+                logger.warning(f"[Proxy] 未配置任何代理")
+                return None
+
+    return None
 
 # 导入数据库模块
 from database import (
@@ -175,6 +263,22 @@ def api_get_accounts():
     end = start + per_page
     paged_accounts = accounts[start:end]
 
+    # 从邮箱池补充密码（确保数据一致性）
+    try:
+        pool = get_email_pool()
+        for acc in paged_accounts:
+            email_addr = acc.get('email', '')
+            pool_email = pool.get_by_address(email_addr)
+            if pool_email:
+                # 优先使用邮箱池的密码（创建时生成的真实密码）
+                if pool_email.get('password') and not acc.get('password'):
+                    acc['password'] = pool_email['password']
+                # 如果数据库密码为空，用邮箱池的
+                elif pool_email.get('password'):
+                    acc['password'] = pool_email['password']
+    except Exception as e:
+        logger.warning(f"[Accounts] 从邮箱池补充密码失败: {e}")
+
     stats = get_accounts_stats()
     total = stats.get('total', 0)
     total_pages = max(1, (total + per_page - 1) // per_page)
@@ -206,6 +310,25 @@ def api_get_account(email: str):
         'account': account,
         'verifications': verifications
     })
+
+
+@app.route('/api/accounts/<path:email>/tag', methods=['PUT'])
+@require_auth
+def api_update_account_tag(email: str):
+    """更新账号标签"""
+    data = request.get_json()
+    tag = data.get('tag', 'unused')
+
+    # 验证标签值
+    valid_tags = ['unused', 'sold', 'used']
+    if tag not in valid_tags:
+        return jsonify({'success': False, 'error': f'无效标签，可选: {valid_tags}'}), 400
+
+    try:
+        update_account(email, tag=tag)
+        return jsonify({'success': True, 'message': f'标签已更新为 {tag}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/accounts/export', methods=['GET'])
@@ -405,6 +528,16 @@ def api_status():
     vet_stats = get_veterans_stats()
     ver_stats = get_verifications_stats()
 
+    # 代理池状态
+    proxy_manager = get_proxy_manager()
+    proxy_stats = proxy_manager.get_stats() if proxy_manager else {
+        'total': 0,
+        'available': 0,
+        'bad': 0,
+        'strategy': 'none',
+        'proxies': []
+    }
+
     return jsonify({
         'success': True,
         'accounts': acc_stats.get('by_status', {}),
@@ -414,6 +547,7 @@ def api_status():
             'available': vet_stats.get('available', 0)
         },
         'verifications': ver_stats.get('by_status', {}),
+        'proxy_pool': proxy_stats,
         'queue_size': 0  # 兼容旧前端
     })
 
@@ -477,6 +611,14 @@ def get_email_pool():
     if _email_pool is None:
         from email_pool import EmailPoolManager
         _email_pool = EmailPoolManager()
+        # 迁移旧数据：为没有密码的邮箱生成密码
+        migrated = _email_pool.migrate_add_passwords()
+        if migrated > 0:
+            logger.info(f"[App] 邮箱池迁移完成: 为 {migrated} 个邮箱生成密码")
+        # 同步数据库状态到邮箱池（修复验证成功后邮箱池没更新的问题）
+        synced = _email_pool.sync_from_database()
+        if synced > 0:
+            logger.info(f"[App] 邮箱池同步完成: {synced} 个邮箱状态更新")
         logger.info("[App] EmailPoolManager 初始化完成")
     return _email_pool
 
@@ -628,6 +770,226 @@ def reset_email(address: str):
     }), 404
 
 
+# ==================== 代理池 API ====================
+
+def _save_proxies_to_pool(proxies: list, protocol: str = 'http') -> dict:
+    """
+    保存代理到代理池文件并重新加载
+
+    Args:
+        proxies: 解析后的代理列表
+        protocol: 协议类型
+
+    Returns:
+        {added: int, duplicates: int, file_path: str}
+    """
+    import os
+    from pathlib import Path
+
+    # 确定保存文件路径
+    data_dir = Path('./data')
+    data_dir.mkdir(exist_ok=True)
+
+    file_map = {
+        'http': 'proxies_http.txt',
+        'https': 'proxies_https.txt',
+        'socks5': 'proxies_socks5.txt',
+    }
+    file_name = file_map.get(protocol, 'proxies_http.txt')
+    file_path = data_dir / file_name
+
+    # 读取现有代理（如果存在）
+    existing_proxies = set()
+    if file_path.exists():
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        existing_proxies.add(line)
+        except Exception as e:
+            logger.warning(f"[Proxy] 读取现有代理文件失败: {e}")
+
+    # 去重，找出新代理
+    new_proxies = [p for p in proxies if p not in existing_proxies]
+    duplicates = len(proxies) - len(new_proxies)
+
+    # 追加新代理到文件
+    if new_proxies:
+        try:
+            with open(file_path, 'a', encoding='utf-8') as f:
+                for proxy in new_proxies:
+                    f.write(proxy + '\n')
+            logger.info(f"[Proxy] 保存 {len(new_proxies)} 个新代理到 {file_path}")
+        except Exception as e:
+            logger.error(f"[Proxy] 保存代理失败: {e}")
+            return {'added': 0, 'duplicates': duplicates, 'file_path': str(file_path), 'error': str(e)}
+
+    # 重新加载代理池
+    global _proxy_manager
+    _proxy_manager = None  # 清除缓存，下次使用时重新加载
+    logger.info(f"[Proxy] 代理池已刷新")
+
+    return {
+        'added': len(new_proxies),
+        'duplicates': duplicates,
+        'file_path': str(file_path)
+    }
+
+
+@app.route('/api/proxy/parse', methods=['POST'])
+@require_auth
+def api_parse_proxy():
+    """
+    解析粘贴的代理列表（支持多种格式）
+
+    请求: {
+        "text": "ip:port\\nip2:port2\\n...",
+        "protocol": "http" | "https" | "socks5",  # 默认 http
+        "save": true  # 是否保存到代理池（默认 false，只解析预览）
+    }
+
+    返回: {
+        "success": true,
+        "proxies": ["http://ip:port", ...],
+        "parsed": 10,  # 成功解析数量
+        "failed": 2,   # 失败数量
+        "added": 8,    # 新增数量（save=true 时）
+        "duplicates": 2 # 重复跳过数量（save=true 时）
+    }
+    """
+    data = request.get_json() or {}
+    text = data.get('text', '').strip()
+    protocol = data.get('protocol', 'http')
+    save = data.get('save', False)  # 是否保存
+
+    if not text:
+        return jsonify({
+            'success': False,
+            'error': '代理列表为空'
+        }), 400
+
+    from proxy_manager import parse_proxy_format
+
+    lines = [line.strip() for line in text.split('\n') if line.strip() and not line.startswith('#')]
+    proxies = []
+    failed_count = 0
+
+    for line in lines:
+        proxy = parse_proxy_format(line, protocol)
+        if proxy:
+            proxies.append(proxy)
+        else:
+            failed_count += 1
+
+    result = {
+        'success': True,
+        'proxies': proxies,
+        'parsed': len(proxies),
+        'failed': failed_count,
+        'total': len(lines)
+    }
+
+    # 如果需要保存
+    if save and proxies:
+        save_result = _save_proxies_to_pool(proxies, protocol)
+        result.update(save_result)
+
+    return jsonify(result)
+
+
+@app.route('/api/proxy/upload', methods=['POST'])
+@require_auth
+def api_upload_proxy_file():
+    """
+    上传代理文件并解析
+
+    请求（multipart/form-data）:
+        file: 代理文件（txt）
+        protocol: http | https | socks5（默认 http）
+        save: true | false（是否保存到代理池，默认 true）
+    """
+    if 'file' not in request.files:
+        return jsonify({
+            'success': False,
+            'error': '未上传文件'
+        }), 400
+
+    file = request.files['file']
+    protocol = request.form.get('protocol', 'http')
+    save = request.form.get('save', 'true').lower() == 'true'  # 默认保存
+
+    if file.filename == '':
+        return jsonify({
+            'success': False,
+            'error': '文件名为空'
+        }), 400
+
+    # 读取文件内容（处理 BOM）
+    try:
+        content = file.read().decode('utf-8-sig')  # utf-8-sig 自动处理 BOM
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'文件读取失败: {str(e)}'
+        }), 400
+
+    from proxy_manager import parse_proxy_format
+
+    lines = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
+    proxies = []
+    failed_count = 0
+
+    for line in lines:
+        proxy = parse_proxy_format(line, protocol)
+        if proxy:
+            proxies.append(proxy)
+        else:
+            failed_count += 1
+
+    result = {
+        'success': True,
+        'proxies': proxies,
+        'parsed': len(proxies),
+        'failed': failed_count,
+        'total': len(lines),
+        'filename': file.filename
+    }
+
+    # 如果需要保存
+    if save and proxies:
+        save_result = _save_proxies_to_pool(proxies, protocol)
+        result.update(save_result)
+
+    return jsonify(result)
+
+
+@app.route('/api/proxy/stats', methods=['GET'])
+@require_auth
+def api_proxy_stats():
+    """获取代理池统计信息"""
+    proxy_manager = get_proxy_manager()
+    main_proxy = config.get_proxy_server()
+
+    stats = {
+        'pool': proxy_manager.get_stats() if proxy_manager else {
+            'total': 0,
+            'available': 0,
+            'bad': 0,
+            'strategy': config.get_proxy_strategy(),
+            'proxies': []
+        },
+        'main_proxy': main_proxy if main_proxy else None,
+        'mode': config.get_proxy_mode(),
+        'prefer_type': config.get_proxy_prefer_type()
+    }
+
+    return jsonify({
+        'success': True,
+        **stats
+    })
+
+
 # ==================== 验证任务 API ====================
 
 import threading
@@ -642,36 +1004,66 @@ _task_lock = threading.Lock()
 @require_auth
 def api_start_verify():
     """
-    启动验证任务（模式4: 手动登录后接管）
+    启动验证任务
 
     请求: {
-        "email": "xxx@009025.xyz",     # 必填: 用于填写 SheerID 表单
-        "jwt": "xxx",                  # 可选: 用于自动获取验证链接（如果在邮箱池中有则自动获取）
-        "mode": "cdp" | "camoufox",    # 可选: 默认 cdp
-        "headless": false              # 可选: 是否无头模式
+        "email": "xxx@009025.xyz",     # 必填: ChatGPT 账号邮箱
+        "password": "xxx",             # 可选: 账号密码（自有账号模式必填）
+        "temp_email": "yyy@009025.xyz",# 可选: 临时邮箱（自有账号模式用于接收 SheerID 链接）
+        "temp_jwt": "xxx",             # 可选: 临时邮箱 JWT
+        "jwt": "xxx",                  # 可选: 用于自动获取验证链接
+        "mode": "cdp" | "camoufox",    # 可选: 默认 camoufox
+        "headless": true,              # 可选: 是否无头模式
+        "proxy_mode": "none" | "fixed" | "pool",  # 可选: 代理模式（默认 none=直连）
+        "fixed_proxy": "http://..."    # 可选: 固定代理地址（proxy_mode=fixed 时必填）
     }
 
-    注意:
-    - 模式4 只需要邮箱地址，不需要账号存在于数据库
-    - JWT 可选，有则自动点击验证链接，无则手动点击
+    两种模式:
+    - 临时邮箱账号: email=临时邮箱，验证码自动获取
+    - 自有账号: email=Gmail等，password必填，temp_email用于接收SheerID链接
+
+    代理模式:
+    - none: 直连，不使用代理
+    - fixed: 使用指定的固定代理
+    - pool: 从代理池轮换
     """
     data = request.get_json() or {}
     email = data.get('email', '').strip()
-    jwt = data.get('jwt', '').strip()  # 可选
-    mode = data.get('mode', 'cdp')  # cdp=连接已打开浏览器, camoufox=无头自动化
-    headless = data.get('headless', False)
+    password = data.get('password', '').strip()  # 账号密码
+    temp_email = data.get('temp_email', '').strip()  # 临时邮箱（自有账号模式）
+    temp_jwt = data.get('temp_jwt', '').strip()  # 临时邮箱 JWT
+    jwt = data.get('jwt', '').strip()  # 兼容旧参数
+    mode = data.get('mode', 'camoufox')  # 默认 camoufox
+    headless = data.get('headless', True)  # 默认无头
+    proxy_mode = data.get('proxy_mode', 'none')  # 代理模式: none/fixed/pool
+    fixed_proxy = data.get('fixed_proxy', '').strip()  # 固定代理地址
 
     if not email:
         return jsonify({'success': False, 'error': '邮箱必填'}), 400
 
-    # 如果提供了 JWT，添加到邮箱池
-    if jwt:
-        try:
-            pool = get_email_pool()
-            pool.add_external(email, jwt)
-            logger.info(f"[Verify] 邮箱已添加到池: {email}")
-        except Exception as e:
-            logger.warning(f"[Verify] 添加邮箱到池失败: {e}")
+    # 判断是否自有账号模式
+    is_own_account = bool(password and temp_email)
+
+    # 如果是临时邮箱账号模式，尝试从邮箱池获取 JWT
+    if not is_own_account:
+        if not jwt:
+            try:
+                pool = get_email_pool()
+                email_data = pool.get_by_address(email)
+                if email_data:
+                    jwt = email_data.get('jwt', '')
+                    logger.info(f"[Verify] 从邮箱池获取 JWT: {email}")
+            except Exception as e:
+                logger.warning(f"[Verify] 获取邮箱 JWT 失败: {e}")
+    else:
+        # 自有账号模式，添加临时邮箱到池
+        if temp_jwt:
+            try:
+                pool = get_email_pool()
+                pool.add_external(temp_email, temp_jwt)
+                logger.info(f"[Verify] 临时邮箱已添加到池: {temp_email}")
+            except Exception as e:
+                logger.warning(f"[Verify] 添加临时邮箱失败: {e}")
 
     # 检查是否已有运行中的任务
     with _task_lock:
@@ -682,7 +1074,7 @@ def api_start_verify():
             }), 400
 
     # 启动后台任务
-    def run_verify_task(email, mode, headless):
+    def run_verify_task(email, mode, headless, password_param=None, temp_email_param=None, is_own_account=False, proxy_mode_param='none', fixed_proxy_param=None):
         import sys
 
         with _task_lock:
@@ -690,6 +1082,9 @@ def api_start_verify():
                 'status': 'running',
                 'started_at': datetime.now().isoformat(),
                 'mode': mode,
+                'is_own_account': is_own_account,
+                'temp_email': temp_email_param,
+                'proxy_mode': proxy_mode_param,
                 'logs': ['任务已启动...']
             }
 
@@ -702,21 +1097,32 @@ def api_start_verify():
                     _running_tasks[email]['logs'] = logs[-50:]  # 保留最后50条
 
         try:
-            if mode == 'cdp':
-                update_log("模式: CDP (连接已打开的 Chrome)")
+            if mode in ('cdp', 'cdp_manual'):
+                if mode == 'cdp_manual':
+                    update_log("模式: CDP 手动登录 (你已登录，脚本自动验证)")
+                else:
+                    update_log("模式: CDP 全自动 (脚本自动登录)")
 
                 # 使用当前 Python 解释器
                 python_exe = sys.executable
                 script_path = os.path.join(os.path.dirname(__file__), 'run_verify.py')
 
-                update_log(f"执行: {python_exe} {script_path}")
+                # 构建命令参数
+                cmd_args = [python_exe, '-u', script_path, '--email', email]
+                if mode == 'cdp_manual':
+                    cmd_args.append('--skip-login')  # 跳过登录步骤
+                    update_log("跳过登录步骤，直接进行验证...")
+
+                update_log(f"执行: {' '.join(cmd_args)}")
 
                 # 使用 Popen 实时读取输出
                 process = subprocess.Popen(
-                    [python_exe, '-u', script_path, '--email', email],  # -u 禁用缓冲
+                    cmd_args,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     bufsize=1,  # 行缓冲
                     cwd=os.path.dirname(__file__)
                 )
@@ -749,19 +1155,95 @@ def api_start_verify():
                 update_log(f"脚本退出码: {process.returncode}")
 
             else:
-                # 使用 Camoufox 无头自动化
-                update_log("模式: Camoufox (无头自动化)")
+                # 使用 Camoufox 自动化（支持自动登录）
+                if is_own_account:
+                    update_log(f"模式: Camoufox 自有账号 (有窗口，需手动输入验证码)")
+                    update_log(f"临时邮箱: {temp_email_param} (接收 SheerID 链接)")
+                else:
+                    update_log("模式: Camoufox 临时邮箱账号 (全自动)")
 
                 import asyncio
                 from automation.camoufox_verify import CamoufoxVerifier
+                from database import get_account_by_email
+                from automation.config import generate_password
+
+                # 获取或生成密码（优先级：用户提供 > 邮箱池 > 数据库 > 生成新密码）
+                if password_param:
+                    # 自有账号模式，使用传入的密码
+                    task_password = password_param
+                    update_log("使用用户提供的密码")
+                else:
+                    # 临时邮箱账号模式
+                    # 1. 优先从邮箱池获取（密码在创建邮箱时预生成）
+                    pool = get_email_pool()
+                    pool_email = pool.get_by_address(email)
+                    if pool_email and pool_email.get('password'):
+                        task_password = pool_email['password']
+                        update_log(f"使用邮箱池中的密码")
+                    else:
+                        # 2. 从数据库获取
+                        account = get_account_by_email(email)
+                        if account and account.get('password'):
+                            task_password = account['password']
+                            update_log("使用数据库中的密码")
+                        else:
+                            # 3. 生成新密码并保存到邮箱池
+                            task_password = generate_password()
+                            pool.update_password(email, task_password)
+                            update_log("生成新密码并保存到邮箱池")
+
+                # 根据代理模式选择代理
+                proxy = None
+                if proxy_mode_param == 'none':
+                    update_log("代理模式: 直连（不使用代理）")
+                elif proxy_mode_param == 'fixed':
+                    if fixed_proxy_param:
+                        proxy = fixed_proxy_param
+                        from proxy_manager import ProxyManager
+                        masked_proxy = ProxyManager._mask_proxy(None, proxy)
+                        update_log(f"代理模式: 固定代理 - {masked_proxy}")
+                    else:
+                        update_log("警告: 固定代理模式但未提供代理地址，使用直连")
+                elif proxy_mode_param == 'pool':
+                    proxy = get_proxy_for_task(mode='camoufox')
+                    if proxy:
+                        from proxy_manager import ProxyManager
+                        masked_proxy = ProxyManager._mask_proxy(None, proxy)
+                        update_log(f"代理模式: 代理池 - {masked_proxy}")
+                    else:
+                        update_log("警告: 代理池为空，使用直连")
+                else:
+                    update_log(f"未知代理模式: {proxy_mode_param}，使用直连")
 
                 async def run():
+                    # 确定 SheerID 表单用的邮箱
+                    # 自有账号模式：用临时邮箱接收链接
+                    # 临时邮箱账号模式：用同一个邮箱
+                    sheerid_email = temp_email_param if is_own_account else email
+
                     verifier = CamoufoxVerifier(
                         account_email=email,
                         headless=headless,
+                        proxy=proxy,
                         screenshot_dir="screenshots"
                     )
-                    return await verifier.run_verify_loop()
+                    success = await verifier.run_verify_loop(
+                        password=task_password,
+                        auto_login=True,
+                        sheerid_email=sheerid_email  # SheerID 表单用的邮箱
+                    )
+
+                    # 根据结果更新代理状态
+                    proxy_manager = get_proxy_manager()
+                    if proxy_manager and proxy:
+                        if success:
+                            proxy_manager.mark_success(proxy)
+                            update_log(f"代理验证成功: {masked_proxy}")
+                        else:
+                            proxy_manager.mark_bad(proxy)
+                            update_log(f"代理验证失败: {masked_proxy}")
+
+                    return success
 
                 success = asyncio.run(run())
                 output = "Camoufox 任务完成"
@@ -799,14 +1281,19 @@ def api_start_verify():
                 })
 
     # 在后台线程运行
-    thread = threading.Thread(target=run_verify_task, args=(email, mode, headless))
+    thread = threading.Thread(
+        target=run_verify_task,
+        args=(email, mode, headless, password, temp_email, is_own_account, proxy_mode, fixed_proxy)
+    )
     thread.daemon = True
     thread.start()
 
     return jsonify({
         'success': True,
         'message': f'验证任务已启动: {email}',
-        'mode': mode
+        'mode': mode,
+        'proxy_mode': proxy_mode,
+        'fixed_proxy': fixed_proxy if proxy_mode == 'fixed' else None
     })
 
 
@@ -881,6 +1368,218 @@ def api_get_running_tasks():
             'success': True,
             'tasks': running
         })
+
+
+@app.route('/api/verify/emergency/<path:email>', methods=['GET'])
+@require_auth
+def api_get_emergency_info(email: str):
+    """
+    获取应急登录信息（当脚本卡住时，用户可手动登录）
+
+    返回:
+    {
+        "success": true,
+        "email": "xxx@009025.xyz",
+        "password": "xxxx",  # ChatGPT 登录密码
+        "email_login_url": "https://one.009025.xyz/",  # 查看验证码的邮箱前端
+        "jwt": "xxx",  # 邮箱 JWT（可选）
+        "instructions": "..."  # 手动登录说明
+    }
+    """
+    # 从邮箱池获取密码
+    password = None
+    jwt = None
+
+    try:
+        pool = get_email_pool()
+        email_data = pool.get_by_address(email)
+        if email_data:
+            password = email_data.get('password')
+            jwt = email_data.get('jwt')
+    except Exception as e:
+        logger.warning(f"[Emergency] 获取邮箱数据失败: {e}")
+
+    # 如果邮箱池没有密码，从数据库获取
+    if not password:
+        try:
+            account = get_account_by_email(email)
+            if account:
+                password = account.get('password')
+        except Exception as e:
+            logger.warning(f"[Emergency] 获取账号数据失败: {e}")
+
+    # 如果都没有，生成一个新密码
+    if not password:
+        password = generate_password()
+        logger.info(f"[Emergency] 生成新密码: {email}")
+
+        # 保存到邮箱池
+        try:
+            pool = get_email_pool()
+            pool.update_password(email, password)
+        except:
+            pass
+
+    # 获取邮箱的注册信息（姓名、生日）
+    profile_data = None
+    try:
+        pool = get_email_pool()
+        email_data = pool.get_by_address(email)
+        if email_data:
+            # 从邮箱池获取注册信息
+            profile_data = {
+                'first_name': email_data.get('first_name', ''),
+                'last_name': email_data.get('last_name', ''),
+                'birth_month': email_data.get('birth_month', ''),
+                'birth_day': email_data.get('birth_day', ''),
+                'birth_year': email_data.get('birth_year', '')
+            }
+            if profile_data['first_name']:
+                logger.info(f"[Emergency] 获取注册信息: {profile_data['first_name']} {profile_data['last_name']}")
+            else:
+                # 邮箱池中没有注册信息（旧数据），生成新的
+                from email_pool import generate_random_profile
+                profile = generate_random_profile()
+                profile_data = profile
+                # 保存到邮箱池
+                pool.update_profile(email, profile['first_name'], profile['last_name'],
+                                   profile['birth_month'], profile['birth_day'], profile['birth_year'])
+                logger.info(f"[Emergency] 生成注册信息: {profile['first_name']} {profile['last_name']}")
+    except Exception as e:
+        logger.warning(f"[Emergency] 获取注册信息失败: {e}")
+
+    return jsonify({
+        'success': True,
+        'email': email,
+        'password': password,
+        'email_login_url': 'https://one.009025.xyz/',
+        'jwt': jwt or '',
+        'profile_data': profile_data,  # 注册时填写的姓名和生日
+        'instructions': '''手动登录步骤：
+1. 打开 https://chatgpt.com/veterans-claim
+2. 点击 "登录"
+3. 输入邮箱和密码
+4. 如果需要验证码，访问邮箱前端获取
+5. 注册时如果要求填姓名/生日，使用下方信息
+6. 登录成功后，点击下方"我已登录，继续验证"按钮'''
+    })
+
+
+@app.route('/api/verify/manual-continue/<path:email>', methods=['POST'])
+@require_auth
+def api_manual_continue_verify(email: str):
+    """
+    用户手动登录后，继续执行验证流程（跳过登录步骤）
+
+    请求: {
+        "mode": "cdp"  # 目前只支持 CDP 模式
+    }
+
+    流程:
+    1. 停止当前卡住的任务（如果有）
+    2. 启动新任务，但跳过登录步骤，直接从验证页面开始
+    """
+    data = request.get_json() or {}
+    mode = data.get('mode', 'cdp')
+
+    logger.info(f"[ManualContinue] 用户手动登录后继续: {email}")
+
+    # 停止当前任务
+    with _task_lock:
+        if email in _running_tasks:
+            task = _running_tasks[email]
+            task['stop_requested'] = True
+            process = task.get('process')
+            if process:
+                try:
+                    process.terminate()
+                    logger.info(f"[ManualContinue] 终止旧任务: {email}")
+                except:
+                    pass
+            # 清除任务记录
+            del _running_tasks[email]
+
+    import time
+    time.sleep(1)
+
+    # 启动新任务（跳过登录）
+    def run_continue_task(email):
+        import sys
+        import subprocess
+
+        with _task_lock:
+            _running_tasks[email] = {
+                'status': 'running',
+                'started_at': datetime.now().isoformat(),
+                'mode': 'cdp',
+                'manual_continue': True,  # 标记为手动继续
+                'logs': ['用户手动登录后继续验证...']
+            }
+
+        def update_log(msg):
+            with _task_lock:
+                if email in _running_tasks:
+                    logs = _running_tasks[email].get('logs', [])
+                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                    _running_tasks[email]['logs'] = logs[-50:]
+
+        try:
+            update_log("模式: CDP (跳过登录，直接验证)")
+
+            python_exe = sys.executable
+            script_path = os.path.join(os.path.dirname(__file__), 'run_verify.py')
+
+            # 添加 --skip-login 参数（需要在 run_verify.py 中支持）
+            process = subprocess.Popen(
+                [python_exe, '-u', script_path, '--email', email, '--skip-login'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                bufsize=1,
+                cwd=os.path.dirname(__file__)
+            )
+
+            with _task_lock:
+                _running_tasks[email]['process'] = process
+
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    update_log(line.strip()[:200])
+                with _task_lock:
+                    if _running_tasks.get(email, {}).get('stop_requested'):
+                        process.terminate()
+                        update_log("任务被用户停止")
+                        break
+
+            process.wait(timeout=1800)
+            success = process.returncode == 0
+
+            with _task_lock:
+                _running_tasks[email].update({
+                    'status': 'success' if success else 'failed',
+                    'completed_at': datetime.now().isoformat()
+                })
+            update_log(f"任务完成: {'成功' if success else '失败'}")
+
+        except Exception as e:
+            update_log(f"错误: {e}")
+            with _task_lock:
+                _running_tasks[email].update({
+                    'status': 'error',
+                    'error': str(e),
+                    'completed_at': datetime.now().isoformat()
+                })
+
+    thread = threading.Thread(target=run_continue_task, args=(email,))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': f'验证任务已继续（跳过登录）: {email}'
+    })
 
 
 @app.route('/api/verify/restart/<path:email>', methods=['POST'])
