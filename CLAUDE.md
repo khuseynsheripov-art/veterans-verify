@@ -171,89 +171,79 @@ CDP 手动：
 
 ## Git 规范（强制）
 
-### 分支策略
+### 当前状态（2026-01-02）
 
-| 分支 | 用途 | 保护 |
-|------|------|------|
-| `main` | 稳定版本，可直接运行 | 只合并已测试通过的代码 |
-| `dev` | 开发分支，日常开发 | 功能完成后合并到 main |
-| `feature/*` | 新功能分支 | 可选 |
+```
+分支：
+  * feature/cdp-auto  ← 当前开发分支
+    dev               ← 未使用
+    main              ← 最终稳定版
 
-### Tag 标记策略（重要！）
+Tag（里程碑）：
+  v0.1-cdp-manual    ← CDP 手动模式可用
+  v0.2-cdp-auto      ← CDP 全自动模式可用
+```
 
-**目的**：在关键稳定点打 tag，防止后续修改破坏已验证的功能
+### 简化工作流程（单人开发）
+
+```
+⚠️ 核心原则：一个模式一个模式来，用 Tag 标记稳定点
+
+当前策略：
+  在 feature/cdp-auto 分支持续开发所有模式
+  每个模式完成 → 打 Tag → 继续下一个
+  全部完成 → 合并到 main
+
+         v0.1          v0.2          v0.3
+          ↓             ↓             ↓
+────●─────●─────────────●─────────────●────→ feature/cdp-auto
+    │                                 │
+    └──────── 任何时候可回退 ─────────┘
+```
+
+### 日常操作
 
 ```bash
-# 格式：v版本号-功能描述
-git tag v0.1-cdp-manual -m "CDP 手动登录模式已验证可用"
+# 查看当前位置
+git branch          # 确认在 feature/cdp-auto
+git log --oneline -5
+
+# 提交修改
+git add .
+git commit -m "修复: xxx"
+git push origin feature/cdp-auto
+
+# 模式完成后打 Tag
+git tag v0.3-camoufox -m "Camoufox 模式可用"
 git push origin --tags
+
+# 出问题时回退到稳定版本
+git stash                      # 保存当前未提交的修改
+git checkout v0.2-cdp-auto     # 回到 CDP 全自动版本
+git checkout feature/cdp-auto  # 回到开发分支
+git stash pop                  # 恢复之前的修改
 ```
 
-| Tag | 说明 | 回退命令 |
-|-----|------|---------|
-| `v0.1-cdp-manual` | CDP 手动模式可用 | `git checkout v0.1-cdp-manual` |
-| `v0.2-cdp-auto` | CDP 全自动模式可用 | `git checkout v0.2-cdp-auto` |
-| `v0.3-camoufox` | Camoufox 模式可用 | `git checkout v0.3-camoufox` |
+### Tag 里程碑
 
-### 标准工作流程（强制！）
+| Tag | 模式 | 状态 | 回退命令 |
+|-----|------|------|---------|
+| `v0.1-cdp-manual` | CDP 手动 | ✅ | `git checkout v0.1-cdp-manual` |
+| `v0.2-cdp-auto` | CDP 全自动 | ✅ | `git checkout v0.2-cdp-auto` |
+| `v0.3-camoufox` | Camoufox | 待开发 | - |
 
-```
-⚠️ 核心原则：测试通过后再提交！
-
-1. 新功能/修复 → 新建 feature/* 分支
-2. 在 feature 分支开发和测试
-3. 测试通过 → 合并到 dev
-4. dev 稳定 → 打 tag 标记
-5. 多个功能稳定 → 合并到 main
-
-分支流向：
-  feature/xxx → dev → main
-      ↑           ↑      ↑
-   开发测试    打tag   稳定版
-```
-
-### ❌ 禁止的做法
+### 最终合并（全部完成后）
 
 ```bash
-# ❌ 未测试就提交到 dev
-git checkout dev
-git commit -m "修复: xxx"  # 没测试过！
-git push
-
-# ❌ 直接在 dev 上开发未完成的功能
-```
-
-### ✅ 正确的做法
-
-```bash
-# ✅ 新建 feature 分支开发
-git checkout dev
-git checkout -b feature/cdp-auto
-
-# 开发...测试...修复...再测试...
-
-# ✅ 测试通过后再合并
-git checkout dev
+# 全部模式测试通过后，合并到 main
+git checkout main
 git merge feature/cdp-auto
-git push
+git push origin main
 
-# ✅ 打 tag 标记稳定点
-git tag v0.2-cdp-auto -m "CDP 全自动模式测试通过"
-git push origin --tags
+# 删除开发分支（可选）
+git branch -d feature/cdp-auto
+git push origin --delete feature/cdp-auto
 ```
-
-### 合并到 dev 的条件
-
-- [ ] 功能在 feature 分支测试通过
-- [ ] 没有破坏已有功能
-- [ ] 代码可运行
-
-### 合并到 main 的条件
-
-- [ ] 至少一个模式经过完整测试
-- [ ] 持久化逻辑验证通过
-- [ ] 没有明显的 bug
-- [ ] 代码已打 tag 标记
 
 ### 提交规范
 
