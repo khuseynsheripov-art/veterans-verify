@@ -53,8 +53,19 @@ class Config:
         # Browser & concurrency
         self._max_workers = 1
         self._headless = True
-        self._proxy_server = ''
         self._debug_screenshot_dir = ''
+
+        # Proxy configuration
+        self._proxy_server = ''  # 主代理（CDP + fallback）
+        self._proxy_http_file = ''  # HTTP 代理池文件
+        self._proxy_https_file = ''  # HTTPS 代理池文件
+        self._proxy_socks5_file = ''  # SOCKS5 代理池文件
+        self._proxy_default_protocol = 'http'
+        self._proxy_prefer_type = 'http'  # http | https | socks5 | mixed
+        self._proxy_strategy = 'round_robin'
+        self._proxy_bad_ttl = 900
+        self._proxy_mode = 'pool_with_fallback'  # pool_only | pool_with_fallback | main_only
+        self._proxy_list = []  # 合并后的代理列表（兼容旧配置）
 
         # Email configs
         self._email_configs = []
@@ -142,8 +153,19 @@ class Config:
         # Browser & concurrency
         self._max_workers = int(os.getenv('MAX_WORKERS', '1'))
         self._headless = os.getenv('HEADLESS', 'true').lower() == 'true'
-        self._proxy_server = os.getenv('PROXY_SERVER', '')
         self._debug_screenshot_dir = os.getenv('DEBUG_SCREENSHOT_DIR', '')
+
+        # Proxy configuration
+        self._proxy_server = os.getenv('PROXY_SERVER', '')
+        self._proxy_http_file = os.getenv('PROXY_HTTP_FILE', '')
+        self._proxy_https_file = os.getenv('PROXY_HTTPS_FILE', '')
+        self._proxy_socks5_file = os.getenv('PROXY_SOCKS5_FILE', '')
+        self._proxy_default_protocol = os.getenv('PROXY_DEFAULT_PROTOCOL', 'http')
+        self._proxy_prefer_type = os.getenv('PROXY_PREFER_TYPE', 'http')
+        self._proxy_strategy = os.getenv('PROXY_STRATEGY', 'round_robin')
+        self._proxy_bad_ttl = int(os.getenv('PROXY_BAD_TTL', '900'))
+        self._proxy_mode = os.getenv('PROXY_MODE', 'pool_with_fallback')
+        self._proxy_list = self._load_proxy_list()  # 加载并合并所有代理
 
         # Human behavior
         self._human_delay_min = int(os.getenv('HUMAN_DELAY_MIN', '50'))
@@ -248,6 +270,88 @@ class Config:
         if not self._email_configs:
             logger.warning("[Config] 警告: 未配置邮箱服务！")
 
+    def _load_proxy_list(self) -> List:
+        """加载并合并所有代理池"""
+        from proxy_manager import load_proxies_from_file, load_proxies_from_env, parse_proxy_format
+        from pathlib import Path
+        import glob
+
+        all_proxies = []
+
+        # 1. 加载环境变量指定的代理池文件
+        if self._proxy_http_file:
+            http_proxies = load_proxies_from_file(self._proxy_http_file, 'http')
+            all_proxies.extend(http_proxies)
+            logger.info(f"[Config] HTTP 代理池: {len(http_proxies)} 个 ({self._proxy_http_file})")
+
+        if self._proxy_https_file:
+            https_proxies = load_proxies_from_file(self._proxy_https_file, 'https')
+            all_proxies.extend(https_proxies)
+            logger.info(f"[Config] HTTPS 代理池: {len(https_proxies)} 个 ({self._proxy_https_file})")
+
+        if self._proxy_socks5_file:
+            socks5_proxies = load_proxies_from_file(self._proxy_socks5_file, 'socks5')
+            all_proxies.extend(socks5_proxies)
+            logger.info(f"[Config] SOCKS5 代理池: {len(socks5_proxies)} 个 ({self._proxy_socks5_file})")
+
+        # 2. 自动发现 data/proxies_*.txt 文件（前端上传保存的）
+        data_dir = Path('./data')
+        if data_dir.exists():
+            auto_files = {
+                'proxies_http.txt': 'http',
+                'proxies_https.txt': 'https',
+                'proxies_socks5.txt': 'socks5',
+            }
+            for filename, protocol in auto_files.items():
+                file_path = data_dir / filename
+                if file_path.exists():
+                    proxies = load_proxies_from_file(str(file_path), protocol)
+                    if proxies:
+                        # 去重：只添加不在列表中的代理
+                        existing = set(all_proxies)
+                        new_proxies = [p for p in proxies if p not in existing]
+                        all_proxies.extend(new_proxies)
+                        logger.info(f"[Config] 自动加载 {filename}: {len(new_proxies)} 个新代理")
+
+        # 3. 兼容旧配置：PROXY_FILE（已废弃）
+        proxy_file = os.getenv('PROXY_FILE', '')
+        if proxy_file and not all_proxies:
+            proxies = load_proxies_from_file(proxy_file, self._proxy_default_protocol)
+            all_proxies.extend(proxies)
+            logger.warning(f"[Config] 使用旧配置 PROXY_FILE（建议迁移到 PROXY_HTTP_FILE）")
+
+        # 4. 兼容旧配置：PROXY_LIST（已废弃）
+        proxy_list_env = os.getenv('PROXY_LIST', '')
+        if proxy_list_env and not all_proxies:
+            proxies = load_proxies_from_env(proxy_list_env, self._proxy_default_protocol)
+            all_proxies.extend(proxies)
+            logger.warning(f"[Config] 使用旧配置 PROXY_LIST（建议迁移到 PROXY_HTTP_FILE）")
+
+        # 5. 主代理标准化
+        if self._proxy_server:
+            main_proxy = parse_proxy_format(self._proxy_server, self._proxy_default_protocol)
+            if main_proxy:
+                self._proxy_server = main_proxy
+                logger.info(f"[Config] 主代理: {self._mask_proxy(main_proxy)}")
+
+        if all_proxies:
+            logger.info(f"[Config] 代理池总数: {len(all_proxies)}")
+        elif not self._proxy_server:
+            logger.warning("[Config] 未配置任何代理（主代理 + 代理池均为空）")
+
+        return all_proxies
+
+    def _mask_proxy(self, proxy: str) -> str:
+        """隐藏代理密码"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(proxy)
+            if parsed.username and parsed.password:
+                return f"{parsed.scheme}://{parsed.username}:***@{parsed.hostname}:{parsed.port}"
+            return proxy
+        except Exception:
+            return proxy
+
     # ==================== Getters ====================
 
     def get_port(self) -> int:
@@ -277,7 +381,38 @@ class Config:
             return self._headless
 
     def get_proxy_server(self) -> str:
+        """获取主代理（CDP + fallback）"""
         return self._proxy_server
+
+    def get_proxy_list(self) -> List[str]:
+        """获取代理池列表"""
+        with self._lock:
+            return self._proxy_list.copy()
+
+    def get_proxy_strategy(self) -> str:
+        """获取代理分配策略"""
+        return self._proxy_strategy
+
+    def get_proxy_bad_ttl(self) -> int:
+        """获取失败代理冷却时间"""
+        return self._proxy_bad_ttl
+
+    def get_proxy_mode(self) -> str:
+        """获取代理池模式"""
+        return self._proxy_mode
+
+    def get_proxy_prefer_type(self) -> str:
+        """获取代理类型偏好"""
+        return self._proxy_prefer_type
+
+    def has_proxy_pool(self) -> bool:
+        """是否配置了代理池"""
+        with self._lock:
+            return len(self._proxy_list) > 0
+
+    def has_main_proxy(self) -> bool:
+        """是否配置了主代理"""
+        return bool(self._proxy_server)
 
     def get_debug_screenshot_dir(self) -> str:
         return self._debug_screenshot_dir

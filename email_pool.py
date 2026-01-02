@@ -426,20 +426,31 @@ class EmailPoolManager:
                     self._save()
                     return True
 
-            # 添加新的
+            # 添加新的 - 自动生成注册信息
+            profile = generate_random_profile()
+            password = generate_password()
+
             email_data = {
                 'address': address,
                 'jwt': jwt,
+                'password': password,  # ChatGPT 登录密码
                 'status': EmailStatus.AVAILABLE.value,
                 'linked_account': None,
                 'created_at': datetime.now().isoformat(),
                 'used_at': None,
                 'verified_at': None,
                 'error_message': None,
-                'is_external': True  # 标记为外部添加
+                'is_external': True,  # 标记为外部添加
+                # 注册信息（ChatGPT 注册时使用）
+                'first_name': profile['first_name'],
+                'last_name': profile['last_name'],
+                'birth_month': profile['birth_month'],
+                'birth_day': profile['birth_day'],
+                'birth_year': profile['birth_year']
             }
             self._pool.append(email_data)
             self._save()
+            logger.info(f"[EmailPool] 添加外部邮箱: {address} ({profile['first_name']} {profile['last_name']})")
             return True
 
     def sync_from_database(self) -> int:
@@ -483,4 +494,31 @@ class EmailPoolManager:
                 self._save()
 
         logger.info(f"[EmailPool] 同步完成，更新了 {count} 个邮箱状态")
+        return count
+
+    def migrate_add_profiles(self) -> int:
+        """
+        迁移：为所有没有注册信息的邮箱生成随机信息
+
+        某些邮箱（如外部添加的旧数据）可能没有 first_name、birth_* 等字段，
+        这个方法会为它们补充随机生成的注册信息。
+
+        Returns:
+            修复的邮箱数量
+        """
+        count = 0
+        with self._lock:
+            for email in self._pool:
+                # 检查是否缺少注册信息
+                if not email.get('first_name') or not email.get('birth_month'):
+                    profile = generate_random_profile()
+                    email['first_name'] = profile['first_name']
+                    email['last_name'] = profile['last_name']
+                    email['birth_month'] = profile['birth_month']
+                    email['birth_day'] = profile['birth_day']
+                    email['birth_year'] = profile['birth_year']
+                    count += 1
+                    logger.info(f"[EmailPool] 迁移: 为 {email['address']} 生成注册信息 ({profile['first_name']} {profile['last_name']})")
+            if count > 0:
+                self._save()
         return count

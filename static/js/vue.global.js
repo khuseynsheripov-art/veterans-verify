@@ -1,0 +1,1 @@
+Redirecting to /vue@3.5.26/dist/vue.global.js

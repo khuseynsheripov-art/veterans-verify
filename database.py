@@ -63,6 +63,7 @@ def init_db():
                 password VARCHAR(255) NOT NULL,
                 jwt TEXT,
                 status VARCHAR(50) DEFAULT 'pending',
+                tag VARCHAR(50) DEFAULT 'unused',
                 error_type VARCHAR(100),
                 error_message TEXT,
                 profile_name VARCHAR(255),
@@ -115,6 +116,16 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_verifications_account ON verifications(account_id);
             CREATE INDEX IF NOT EXISTS idx_verifications_status ON verifications(status);
         """)
+
+        # 迁移：添加 tag 字段（如果不存在）
+        try:
+            cursor.execute("""
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tag VARCHAR(50) DEFAULT 'unused'
+            """)
+            conn.commit()
+        except Exception as e:
+            logger.debug(f"迁移 tag 字段: {e}")
+
         logger.info("数据库表初始化完成")
 
 
@@ -180,19 +191,72 @@ def import_used_veterans(json_path: str = "data/veterans_used.json"):
         return updated
 
 
-def get_available_veteran(branch: str = None) -> Optional[Dict]:
-    """获取一条可用的军人数据 (未被使用过的)"""
+def get_available_veteran(branch: str = None, random_order: bool = True) -> Optional[Dict]:
+    """
+    获取一条可用的军人数据 (未被使用过的)
+
+    Args:
+        branch: 指定军种（可选）
+        random_order: 是否随机排序（默认 True，避免被检测到模式）
+
+    数据质量筛选：
+    - 名字长度 >= 2 字符
+    - 合理的出生年份（1960-2000，验证时 25-65 岁）
+    """
     with get_db() as conn:
         cursor = conn.cursor()
+
+        # 基础筛选条件
+        conditions = [
+            "used = FALSE",
+            "LENGTH(first_name) >= 2",
+            "LENGTH(last_name) >= 2",
+            "birth_year::INTEGER >= 1960",
+            "birth_year::INTEGER <= 2000"
+        ]
+
         if branch:
-            cursor.execute("""
-                SELECT * FROM veterans WHERE used = FALSE AND branch = %s LIMIT 1
-            """, (branch,))
+            conditions.append("branch = %s")
+            params = [branch]
         else:
-            cursor.execute("SELECT * FROM veterans WHERE used = FALSE LIMIT 1")
+            params = []
+
+        where_clause = " AND ".join(conditions)
+
+        # 随机排序避免被检测到模式
+        order_clause = "ORDER BY RANDOM()" if random_order else "ORDER BY id"
+
+        query = f"SELECT * FROM veterans WHERE {where_clause} {order_clause} LIMIT 1"
+        cursor.execute(query, params) if params else cursor.execute(query)
 
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def get_available_veteran_by_rotation() -> Optional[Dict]:
+    """
+    轮换军种获取军人数据
+
+    策略：按照统计占比轮换选择军种，避免集中使用同一军种
+    """
+    # 按军种统计可用数量
+    stats = get_veterans_stats()
+    available_branches = {
+        branch: data['total'] - data['used']
+        for branch, data in stats.get('by_branch', {}).items()
+        if data['total'] - data['used'] > 0
+    }
+
+    if not available_branches:
+        return None
+
+    # 按可用数量权重随机选择军种
+    import random
+    branches = list(available_branches.keys())
+    weights = list(available_branches.values())
+
+    selected_branch = random.choices(branches, weights=weights, k=1)[0]
+    return get_available_veteran(branch=selected_branch)
 
 
 def mark_veteran_used(veteran_id: str, used_by: str):
@@ -274,8 +338,8 @@ def get_account_by_id(account_id: int) -> Optional[Dict]:
 
 def update_account(email: str, **kwargs):
     """更新账号信息"""
-    allowed_fields = ['password', 'jwt', 'status', 'error_type', 'error_message',
-                      'profile_name', 'profile_birthday', 'consumed_email', 'proxy', 'note']
+    allowed_fields = ['password', 'jwt', 'status', 'tag', 'error_type', 'error_message',
+                      'profile_name', 'profile_birthday', 'consumed_email', 'proxy', 'profile_path', 'note']
     updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
 
     if not updates:

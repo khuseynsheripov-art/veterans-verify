@@ -29,9 +29,10 @@ from typing import Optional, Dict, Tuple
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-# 加载环境变量
+# 加载环境变量（按 CLAUDE.md 规则：先 .env.example，再 .env.local 覆盖）
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / '.env.local')
+load_dotenv(Path(__file__).parent / '.env.example')
+load_dotenv(Path(__file__).parent / '.env.local', override=True)
 
 # 日志配置 - 确保实时输出（不缓冲）+ UTF-8 编码支持
 class FlushStreamHandler(logging.StreamHandler):
@@ -354,10 +355,35 @@ async def detect_page_state(page) -> Tuple[str, str]:
 
         # ChatGPT 首页
         if "chatgpt.com" in url and "veterans-claim" not in url:
+            # ⚠️ 2026-01-01 新增：检测新用户引导页面
+            # 引导页1: "是什么促使你使用 ChatGPT？"
+            if "是什么促使你使用" in text or "what brings you" in text_lower:
+                return "onboarding_purpose", "New user onboarding - purpose selection"
+            # 引导页2: "你已准备就绪"
+            if "你已准备就绪" in text or "you're all set" in text_lower or "you are all set" in text_lower:
+                return "onboarding_ready", "New user onboarding - ready page"
+            # 旧版欢迎弹窗（入门技巧）
+            if "入门技巧" in text or "Getting started" in text_lower or "here are some tips" in text_lower:
+                return "welcome_dialog", "New user welcome dialog detected"
             return "chatgpt_home", "On ChatGPT home"
 
-        # OpenAI 登录页面 - 需要继续登录流程
+        # OpenAI 登录页面 - 需要细分状态
         if "auth.openai.com" in url or "auth0.openai.com" in url:
+            # ⚠️ 2025-12-31 新增：细分 auth 子页面状态
+            # 1. 验证码页面
+            if "/email-verification" in url or "/verify" in url:
+                if "检查您的收件箱" in text or "check your inbox" in text_lower or "enter the code" in text_lower:
+                    return "email_verification", "On email verification page, need code"
+            # 2. 密码页面
+            if "/create-account/password" in url or "/password" in url:
+                if "创建密码" in text or "create password" in text_lower or "create a password" in text_lower:
+                    return "password_page", "On password creation page"
+                elif "输入密码" in text or "enter your password" in text_lower:
+                    return "password_page", "On password login page"
+            # 3. about-you 页面
+            if "/about-you" in url:
+                return "about_you_page", "On about-you page, need age info"
+            # 4. 其他 auth 页面
             return "auth_page", f"On auth page, need to complete login"
 
         # SheerID 页面但状态不明
@@ -662,10 +688,13 @@ async def logout_chatgpt(page, timeout: int = 30) -> bool:
     """
     退出 ChatGPT 登录，为下一个账号做准备
 
-    CDP 兼容版本：
-    1. 优先使用 JavaScript 清除 cookies/storage（CDP 模式兼容）
-    2. 尝试点击退出按钮
-    3. 所有操作都有超时保护
+    使用 MCP 验证过的正确选择器（2026-01-03 更新）：
+    1. 点击个人资料菜单
+    2. 点击退出登录菜单项
+    3. 确认退出
+    4. 处理退出后弹窗
+
+    支持中英双语选择器！
 
     Args:
         page: Playwright page
@@ -673,8 +702,30 @@ async def logout_chatgpt(page, timeout: int = 30) -> bool:
     """
     logger.info("正在退出 ChatGPT 登录...")
 
+    # 中英双语选择器
+    PROFILE_MENU_NAMES = ['打开"个人资料"菜单', 'Open profile menu', 'Profile', 'User menu']
+    LOGOUT_MENUITEM_NAMES = ['退出登录', 'Log out', 'Sign out']
+    LOGOUT_CONFIRM_NAMES = ['退出登录', 'Log out', 'Sign out']
+    SWITCH_ACCOUNT_NAMES = ['登录至另一个帐户', 'Log in to another account', 'Sign in to another account']
+    CLOSE_NAMES = ['关闭', 'Close', 'Dismiss']
+
+    async def find_and_click(role: str, names: list, container=None, required: bool = False) -> bool:
+        """尝试多个名称找到并点击元素"""
+        base = container or page
+        for name in names:
+            try:
+                elem = base.get_by_role(role, name=name)
+                if await elem.count() > 0:
+                    await elem.click()
+                    logger.info(f"✓ 点击了 {role}[name='{name}']")
+                    return True
+            except:
+                continue
+        if required:
+            logger.warning(f"未找到 {role}，尝试过: {names}")
+        return False
+
     try:
-        # 设置整体超时
         start_time = time.time()
 
         def check_timeout():
@@ -688,90 +739,46 @@ async def logout_chatgpt(page, timeout: int = 30) -> bool:
                 timeout=15
             )
         except asyncio.TimeoutError:
-            logger.warning("导航超时，继续尝试清除登录状态...")
+            logger.warning("导航超时，继续尝试退出...")
         await asyncio.sleep(1)
         check_timeout()
 
-        # 方法1（CDP 兼容）：使用 JavaScript 清除所有存储
-        try:
-            logger.debug("尝试 JavaScript 清除存储...")
-            await page.evaluate("""() => {
-                // 清除 localStorage
-                try { localStorage.clear(); } catch(e) {}
-                // 清除 sessionStorage
-                try { sessionStorage.clear(); } catch(e) {}
-                // 清除 cookies (通过 document.cookie)
-                try {
-                    document.cookie.split(';').forEach(cookie => {
-                        const name = cookie.split('=')[0].trim();
-                        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';
-                        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=.chatgpt.com';
-                        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=.openai.com';
-                    });
-                } catch(e) {}
-            }""")
-            logger.info("✓ 已通过 JavaScript 清除存储")
-        except Exception as e:
-            logger.debug(f"JavaScript 清除存储失败: {e}")
-        check_timeout()
-
-        # 方法2：尝试点击用户菜单退出
-        try:
-            # 点击用户头像/菜单按钮
-            user_menu = await page.query_selector('[data-testid="profile-button"], [aria-label*="profile"], button[class*="avatar"]')
-            if user_menu:
-                await user_menu.click()
-                await asyncio.sleep(0.5)
-
-                # 点击退出登录选项
-                logout_btn = await page.query_selector('a:has-text("Log out"), button:has-text("Log out"), a:has-text("退出"), button:has-text("退出")')
-                if logout_btn:
-                    await logout_btn.click()
-                    await asyncio.sleep(2)
-                    logger.info("✓ 已点击退出登录按钮")
-        except Exception as e:
-            logger.debug(f"点击退出按钮失败: {e}")
-        check_timeout()
-
-        # 方法3（后备）：尝试 context.clear_cookies（非 CDP 模式）
-        try:
-            context = page.context
-            await asyncio.wait_for(context.clear_cookies(), timeout=5)
-            logger.info("✓ 已清除 Context Cookies")
-        except asyncio.TimeoutError:
-            logger.debug("context.clear_cookies() 超时（CDP 模式正常）")
-        except Exception as e:
-            logger.debug(f"清除 Cookies 失败: {e}")
-        check_timeout()
-
-        # 方法4：访问登出 URL
-        try:
-            await asyncio.wait_for(
-                page.goto("https://chatgpt.com/auth/logout", wait_until="domcontentloaded"),
-                timeout=10
-            )
-            await asyncio.sleep(1)
-            logger.info("✓ 已访问登出 URL")
-        except asyncio.TimeoutError:
-            logger.debug("登出 URL 超时")
-        except Exception as e:
-            logger.debug(f"访问登出 URL 失败: {e}")
-
-        # 最后刷新页面确认
-        try:
-            await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=10000)
-            await asyncio.sleep(1)
-        except:
-            pass
-
-        # 检查是否真的退出了
-        text = await page.evaluate("() => document.body?.innerText || ''")
-        if "log in" in text.lower() or "sign up" in text.lower() or "get started" in text.lower():
-            logger.info("✓ 确认已退出登录")
+        # 步骤1：点击个人资料菜单
+        logger.info("步骤1: 点击个人资料菜单...")
+        if not await find_and_click("button", PROFILE_MENU_NAMES):
+            logger.info("未找到个人资料菜单，可能未登录")
             return True
-        else:
-            logger.warning("退出登录状态不确定，继续执行...")
-            return True  # 继续执行，后续会处理
+        await asyncio.sleep(0.5)
+        check_timeout()
+
+        # 步骤2：点击菜单中的"退出登录"
+        logger.info("步骤2: 点击退出登录菜单项...")
+        if not await find_and_click("menuitem", LOGOUT_MENUITEM_NAMES):
+            logger.warning("未找到退出登录菜单项")
+            return True
+        await asyncio.sleep(0.5)
+        check_timeout()
+
+        # 步骤3：确认退出（弹窗中的按钮）
+        logger.info("步骤3: 确认退出...")
+        dialog = page.locator("dialog")
+        await find_and_click("button", LOGOUT_CONFIRM_NAMES, container=dialog)
+        await asyncio.sleep(1)
+        check_timeout()
+
+        # 等待页面刷新
+        await asyncio.sleep(1)
+
+        # 步骤4：处理退出后弹窗
+        logger.info("步骤4: 处理退出后弹窗...")
+        # 优先点击"登录至另一个帐户"
+        if not await find_and_click("button", SWITCH_ACCOUNT_NAMES):
+            # 或者关闭弹窗
+            await find_and_click("button", CLOSE_NAMES, container=page.locator("dialog"))
+
+        await asyncio.sleep(0.5)
+        logger.info("✓ 退出登录完成")
+        return True
 
     except TimeoutError as e:
         logger.error(f"退出登录超时: {e}")
@@ -890,49 +897,36 @@ async def handle_about_you_page(page, email: str = None) -> bool:
         except:
             pass
 
-        # 填写生日（spinbutton 类型）
-        # 年份
-        try:
-            year_input = page.get_by_role("spinbutton", name="年")
-            if await year_input.count() > 0:
-                await year_input.fill(birth_year)
-            else:
-                year_input = await page.query_selector('input[name="year"]')
-                if year_input:
-                    await year_input.fill(birth_year)
-            await asyncio.sleep(0.2)
-        except:
-            pass
+        # ⚠️ 2026-01-02 修复：spinbutton 是 <div role="spinbutton">，不是 input
+        # 使用 Playwright 的 get_by_role + fill 方法（MCP 测试验证有效）
+        # 2026-01-02 更新：中英双语支持
+        async def fill_spinbutton(aria_labels: list, value: str, label: str):
+            """使用 Playwright fill 方法填写 spinbutton，支持中英双语"""
+            try:
+                # 尝试多种语言的 aria-label
+                for aria_label in aria_labels:
+                    spinbutton = page.get_by_role("spinbutton", name=aria_label)
+                    if await spinbutton.count() > 0:
+                        await spinbutton.fill(value)
+                        logger.info(f"✓ 填写{label}: {value} (使用 name='{aria_label}')")
+                        await asyncio.sleep(0.3)
+                        return True
+                # 所有 label 都没找到
+                logger.warning(f"⚠️ {label}填写失败: 未找到 spinbutton，尝试过: {aria_labels}")
+                return False
+            except Exception as e:
+                logger.warning(f"⚠️ {label}填写失败: {e}")
+                return False
 
-        # 月份
-        try:
-            month_input = page.get_by_role("spinbutton", name="月")
-            if await month_input.count() > 0:
-                await month_input.fill(birth_month)
-            else:
-                month_input = await page.query_selector('input[name="month"]')
-                if month_input:
-                    await month_input.fill(birth_month)
-            await asyncio.sleep(0.2)
-        except:
-            pass
-
-        # 日期
-        try:
-            day_input = page.get_by_role("spinbutton", name="日")
-            if await day_input.count() > 0:
-                await day_input.fill(birth_day)
-            else:
-                day_input = await page.query_selector('input[name="day"]')
-                if day_input:
-                    await day_input.fill(birth_day)
-        except:
-            pass
+        # spinbutton aria-label 中英双语
+        await fill_spinbutton(["年", "Year", "year"], birth_year, "年份")
+        await fill_spinbutton(["月", "Month", "month"], birth_month, "月份")
+        await fill_spinbutton(["日", "Day", "day"], birth_day, "日期")
 
         await asyncio.sleep(0.5)
 
-        # 点击继续
-        continue_btn = await page.query_selector('button:has-text("Continue"), button:has-text("继续")')
+        # 点击继续（使用精确匹配）
+        continue_btn = await page.query_selector('button:text-is("Continue"), button:text-is("继续"), button[type="submit"]')
         if continue_btn:
             await continue_btn.click()
             await asyncio.sleep(2)
@@ -956,9 +950,315 @@ async def wait_for_page_change(page, original_url: str, original_text: str, time
     return False
 
 
+async def auto_login_chatgpt(page, email: str, password: str) -> bool:
+    """
+    自动登录 ChatGPT 账号（简洁版状态机模式）
+
+    设计原则：
+    1. 职责单一：只负责登录，登录成功后 goto veterans-claim
+    2. 弹窗策略：有就处理，没有也不阻塞（不等待可能不存在的弹窗）
+    3. 解耦设计：验证核心的 detect_page_state() 会处理后续弹窗/引导页
+
+    流程（基于 TODO.md MCP 探索结果）：
+    1. 退出当前登录（如果已登录）
+    2. 点击登录按钮 → 弹窗输入邮箱 → 继续
+    3. 验证码页面 → 获取验证码 → 输入 → 继续
+    4. （新用户）创建密码 / about-you 页面
+    5. 登录成功 → goto(veterans-claim)
+
+    Returns:
+        True: 登录成功，已导航到 veterans-claim
+        False: 登录失败
+    """
+    logger.info("=" * 50)
+    logger.info(f"【自动登录】开始: {email}")
+    logger.info("=" * 50)
+
+    max_loops = 30  # 最大循环次数，防止死循环
+    loop_count = 0
+
+    while loop_count < max_loops:
+        loop_count += 1
+
+        try:
+            # 检测当前状态
+            url = page.url
+            text = await page.evaluate("() => document.body?.innerText || ''")
+            text_lower = text.lower()
+
+            logger.info(f"[{loop_count}] URL: {url[:60]}...")
+
+            # ========== 状态1: 已在 veterans-claim 且已登录 ==========
+            if "veterans-claim" in url:
+                # 检查是否有验证按钮（说明已登录）
+                has_verify_btn = "verify" in text_lower or "验证" in text_lower or "claim" in text_lower
+                has_login_btn = "log in" in text_lower and "verify" not in text_lower
+
+                if has_verify_btn and not has_login_btn:
+                    # ⚠️ 2026-01-03 修复：检查当前登录的是否是目标邮箱
+                    current_account = await get_logged_in_account(page)
+                    if current_account and current_account.lower() == email.lower():
+                        logger.info(f"✓ 已在 veterans-claim 页面且已用目标邮箱登录: {email}")
+                        return True
+                    elif current_account:
+                        # 登录的是其他账号，需要先退出
+                        logger.warning(f"⚠️ 当前登录的是其他账号: {current_account}，需要退出后重新登录 {email}")
+                        await logout_chatgpt(page, timeout=20)
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        # 无法检测到账号，假设正确
+                        logger.info("✓ 已在 veterans-claim 页面且已登录（无法验证账号）")
+                        return True
+                elif has_login_btn:
+                    # 需要登录，点击登录按钮
+                    logger.info("在 veterans-claim 但未登录，点击登录...")
+                    login_btn = await page.query_selector('button:has-text("Log in"), button:has-text("登录"), a:has-text("Log in")')
+                    if login_btn:
+                        await login_btn.click()
+                        await asyncio.sleep(2)
+                    continue
+
+            # ========== 优先处理 auth.openai.com 页面（放在弹窗检测之前！）==========
+            # 原因：auth 页面可能有只读邮箱字段，会被误判为"登录弹窗"
+            if "auth.openai.com" in url:
+                # --- 验证码页面 ---
+                if "email-verification" in url or "verify" in url:
+                    if "检查您的收件箱" in text or "check your inbox" in text_lower or "enter the code" in text_lower:
+                        logger.info("验证码页面，获取验证码...")
+                        code = await get_chatgpt_verification_code(email)
+                        if code:
+                            logger.info(f"✓ 获取到验证码: {code}")
+                            code_input = await page.query_selector('input[name="code"], input[autocomplete="one-time-code"], input[type="text"]')
+                            if code_input:
+                                await code_input.fill(code)
+                                await asyncio.sleep(0.5)
+                                continue_btn = await page.query_selector('button:text-is("继续"), button:text-is("Continue"), button[type="submit"]')
+                                if continue_btn:
+                                    await continue_btn.click()
+                                    await asyncio.sleep(3)
+                        else:
+                            logger.error("❌ 获取验证码失败")
+                            return False
+                        continue
+
+                # --- 密码页面（创建或输入）---
+                if "password" in url or "create-account" in url:
+                    password_input = await page.query_selector('input[type="password"]')
+                    if password_input:
+                        is_create = "创建密码" in text or "create password" in text_lower or "create a password" in text_lower
+                        logger.info(f"{'创建' if is_create else '输入'}密码...")
+                        await password_input.fill(password)
+                        await asyncio.sleep(0.3)
+                        logger.info(f"✓ {'创建' if is_create else '输入'}密码完成")
+                        continue_btn = await page.query_selector('button:text-is("继续"), button:text-is("Continue"), button[type="submit"]')
+                        if continue_btn:
+                            await continue_btn.click()
+                            await asyncio.sleep(3)
+                        continue
+
+                # --- about-you 页面 ---
+                if "about-you" in url:
+                    logger.info("处理 about-you 页面...")
+                    await handle_about_you_page(page, email)
+                    await asyncio.sleep(2)
+                    continue
+
+                # --- 邮箱输入页面 ---
+                if "log-in" in url:
+                    email_input = await page.query_selector('input[type="email"], input[name="email"]')
+                    if email_input:
+                        logger.info("在 auth 页面输入邮箱...")
+                        await email_input.fill(email)
+                        await asyncio.sleep(0.3)
+                        continue_btn = await page.query_selector('button:text-is("继续"), button:text-is("Continue"), button[type="submit"]')
+                        if continue_btn:
+                            await continue_btn.click()
+                            await asyncio.sleep(2)
+                        continue
+
+                # --- OpenAI Platform 页面 ---
+                logger.debug(f"未知的 auth 页面状态，等待...")
+                await asyncio.sleep(2)
+                continue
+
+            # ========== 弹窗检测（仅在非 auth 页面时）==========
+            # ChatGPT 的弹窗可能是 <dialog> 或 <div data-state="open">
+            dialog = await page.query_selector("dialog")
+            modal_div = await page.query_selector('div[data-state="open"][class*="fixed"]')
+            has_visible_dialog = False
+
+            if dialog:
+                try:
+                    has_visible_dialog = await dialog.is_visible()
+                except:
+                    pass
+
+            # 如果没有 dialog，检查是否有模态 div（ChatGPT 使用这种方式）
+            if not has_visible_dialog and modal_div:
+                try:
+                    has_visible_dialog = await modal_div.is_visible()
+                    if has_visible_dialog:
+                        dialog = modal_div  # 使用模态 div 作为弹窗
+                except:
+                    pass
+
+            # 另一种检测方式：直接检查是否有可见的邮箱输入框（排除只读字段）
+            email_input_visible = False
+            try:
+                # 排除 readonly 的邮箱字段（auth 页面的只读邮箱显示）
+                email_input_check = page.locator('input[type="email"]:not([readonly]), input[placeholder*="邮件"]:not([readonly])')
+                email_input_visible = await email_input_check.first.is_visible() if await email_input_check.count() > 0 else False
+            except:
+                pass
+
+            if email_input_visible and not has_visible_dialog:
+                has_visible_dialog = True  # 有可编辑邮箱输入框才认为弹窗可见
+
+            logger.debug(f"[DEBUG] dialog={dialog is not None}, modal_div={modal_div is not None}, email_input={email_input_visible}, has_visible_dialog={has_visible_dialog}")
+
+            # ========== 状态2: chatgpt.com 主页（无弹窗时）==========
+            if "chatgpt.com" in url and "veterans-claim" not in url and "auth" not in url and not has_visible_dialog:
+                # 检查是否已登录
+                has_login_button = "log in" in text_lower or "登录" in text_lower or "sign up" in text_lower
+                has_chat_input = await page.query_selector('textarea[placeholder*="Message"], textarea[placeholder*="消息"]')
+
+                if has_chat_input:
+                    # 已登录，直接导航到 veterans-claim
+                    logger.info("✓ 已登录 chatgpt.com，导航到 veterans-claim...")
+                    await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(2)
+                    continue
+
+                if has_login_button:
+                    # 未登录，点击登录按钮
+                    logger.info("chatgpt.com 未登录，点击登录按钮...")
+                    login_btn = await page.query_selector('button:has-text("登录"), button:has-text("Log in")')
+                    if login_btn:
+                        await login_btn.click()
+                        await asyncio.sleep(1)
+
+                        # 等待弹窗出现（短超时，有就处理）
+                        try:
+                            # 等待 dialog 或模态 div 出现
+                            await page.wait_for_selector('dialog, div[data-state="open"][class*="fixed"]', timeout=3000)
+                            logger.info("✓ 登录弹窗已出现")
+                        except:
+                            logger.debug("未检测到弹窗，继续...")
+                    continue
+
+            # ========== 状态3: 登录弹窗（有可见弹窗时）==========
+            # 通过 has_visible_dialog 判断，不依赖 dialog 变量类型
+            if has_visible_dialog:
+                logger.info("检测到登录弹窗，尝试输入邮箱...")
+
+                # 直接在页面上查找邮箱输入框（不依赖弹窗容器类型）
+                try:
+                    # 多种选择器尝试
+                    email_input = None
+                    selectors = [
+                        'input[type="email"]',
+                        'input[placeholder*="邮件"]',
+                        'input[placeholder*="email" i]',
+                        'input[name="email"]',
+                        'input[autocomplete="email"]',
+                    ]
+
+                    for selector in selectors:
+                        try:
+                            input_elem = page.locator(selector).first
+                            if await input_elem.count() > 0 and await input_elem.is_visible():
+                                email_input = input_elem
+                                logger.info(f"✓ 找到邮箱输入框: {selector}")
+                                break
+                        except:
+                            continue
+
+                    if email_input:
+                        await email_input.click()
+                        await asyncio.sleep(0.2)
+                        await email_input.fill(email)
+                        await asyncio.sleep(0.3)
+                        logger.info(f"✓ 输入邮箱: {email}")
+
+                        # 按 Enter 提交
+                        await email_input.press("Enter")
+                        await asyncio.sleep(2)
+                    else:
+                        logger.warning("⚠️ 未找到邮箱输入框，等待...")
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"⚠️ 弹窗邮箱输入失败: {e}")
+                    await asyncio.sleep(1)
+                continue
+
+            # ========== 状态4: OpenAI Platform 页面（新用户可能跳转到这里）==========
+            if "platform.openai.com" in url:
+                logger.info("跳转到 OpenAI Platform，返回 ChatGPT...")
+                chatgpt_link = await page.query_selector('a:has-text("ChatGPT"), a:has-text("I\'m looking for ChatGPT")')
+                if chatgpt_link:
+                    await chatgpt_link.click()
+                    await asyncio.sleep(3)
+                else:
+                    # 直接导航
+                    await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(2)
+                continue
+
+            # ========== 状态9: 新用户引导页面（登录后可能出现）==========
+            if "chatgpt.com" in url and "veterans-claim" not in url:
+                # 引导页1: "您想使用 ChatGPT 做什么？" / "是什么促使你使用 ChatGPT？"
+                onboarding_keywords = ["您想使用", "是什么促使你", "what brings you", "what do you want"]
+                if any(kw in text for kw in onboarding_keywords) or any(kw in text_lower for kw in onboarding_keywords):
+                    logger.info("处理新用户引导页，直接导航到 veterans-claim...")
+                    # 不点跳过，直接导航到目标页面
+                    await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(2)
+                    continue
+
+                # 引导页2: "你已准备就绪"
+                if "你已准备就绪" in text or "you're all set" in text_lower:
+                    logger.info("处理准备就绪页...")
+                    continue_btn = await page.query_selector('button:text-is("继续"), button:text-is("Continue")')
+                    if continue_btn:
+                        await continue_btn.click()
+                        await asyncio.sleep(1)
+                    continue
+
+                # 欢迎弹窗
+                if "入门技巧" in text or "tips" in text_lower:
+                    logger.info("处理欢迎弹窗...")
+                    close_btn = await page.query_selector('button[aria-label="关闭"], button[aria-label="Close"], button:has-text("×")')
+                    if close_btn:
+                        await close_btn.click()
+                    else:
+                        await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.5)
+                    continue
+
+            # ========== 未知状态，等待一下再检测 ==========
+            logger.debug(f"未匹配任何状态，等待后重试...")
+            await asyncio.sleep(2)
+
+            # 如果连续多次未匹配，尝试导航到 veterans-claim
+            if loop_count > 5 and loop_count % 5 == 0:
+                logger.info("多次未匹配状态，尝试导航到 veterans-claim...")
+                await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2)
+
+        except Exception as e:
+            logger.error(f"登录循环出错: {e}")
+            await asyncio.sleep(2)
+
+    logger.error(f"❌ 登录超时，已循环 {max_loops} 次")
+    return False
+
+
 async def register_or_login_chatgpt(page, email: str, password: str, max_retries: int = 3) -> bool:
     """
-    注册或登录 ChatGPT 账号（通过页面状态检测，不依赖数据库）
+    注册或登录 ChatGPT 账号（旧版本，保留兼容）
+
+    ⚠️ 建议使用新的 auto_login_chatgpt 函数
 
     改进版本：
     - 每个操作后等待页面变化确认
@@ -1178,25 +1478,35 @@ async def register_or_login_chatgpt(page, email: str, password: str, max_retries
             # 点击继续按钮
             continue_clicked = False
 
-            # 如果是弹窗，在弹窗内查找继续按钮
+            # 如果是弹窗，优先用 Enter 提交（避免误点 Google 登录按钮）
             if is_dialog:
                 try:
-                    dialog = page.locator("dialog")
-                    continue_btn = dialog.get_by_role("button", name="继续")
-                    if await continue_btn.count() == 0:
-                        continue_btn = dialog.get_by_role("button", name="Continue")
-                    if await continue_btn.count() > 0:
-                        await continue_btn.click()
-                        continue_clicked = True
-                        logger.info("✓ 在弹窗内点击继续按钮")
+                    # ⚠️ 2025-12-31 修复：优先按 Enter，避免误点"继续使用 Google 登录"
+                    logger.info("尝试按 Enter 提交邮箱...")
+                    await email_input.press("Enter")
+                    continue_clicked = True
+                    logger.info("✓ 按 Enter 提交")
                 except Exception as e:
-                    logger.debug(f"弹窗内继续按钮失败: {e}")
+                    logger.debug(f"Enter 失败: {e}")
+                    # 回退：使用精确匹配的按钮
+                    try:
+                        dialog = page.locator("dialog")
+                        # 使用 exact=True 精确匹配，避免匹配到"继续使用 Google 登录"
+                        continue_btn = dialog.get_by_role("button", name="继续", exact=True)
+                        if await continue_btn.count() == 0:
+                            continue_btn = dialog.get_by_role("button", name="Continue", exact=True)
+                        if await continue_btn.count() > 0:
+                            await continue_btn.click()
+                            continue_clicked = True
+                            logger.info("✓ 在弹窗内点击继续按钮（精确匹配）")
+                    except Exception as e2:
+                        logger.debug(f"弹窗内继续按钮失败: {e2}")
 
-            # 回退：在页面中查找继续按钮
+            # 回退：在页面中查找继续按钮（使用精确匹配）
             if not continue_clicked:
                 for btn_selector in [
-                    'button:has-text("继续")',
-                    'button:has-text("Continue")',
+                    'button:text-is("继续")',      # 精确匹配，不会匹配"继续使用 Google 登录"
+                    'button:text-is("Continue")',  # 精确匹配
                     'button[type="submit"]',
                 ]:
                     try:
@@ -1236,21 +1546,29 @@ async def register_or_login_chatgpt(page, email: str, password: str, max_retries
             logger.info(f"密码页面 URL: {current_url}")
             page_text = await page.evaluate("() => document.body?.innerText || ''")
 
-            # 尝试找密码输入框
-            password_input = None
-            for selector in [
-                'input[type="password"]',
-                'input[name="password"]',
-                'input[autocomplete="new-password"]',
-                'input[autocomplete="current-password"]',
-            ]:
-                try:
-                    password_input = await page.wait_for_selector(selector, timeout=5000)
-                    if password_input:
-                        logger.info(f"✓ 找到密码输入框: {selector}")
-                        break
-                except:
-                    continue
+            # ⚠️ 2025-12-31 修复：先检测是否已在验证码页面，避免等待密码框 20s
+            if "/email-verification" in current_url or "/verify" in current_url:
+                if "检查您的收件箱" in page_text or "check your inbox" in page_text.lower() or "enter the code" in page_text.lower():
+                    logger.info("✓ 检测到已在验证码页面，跳过密码步骤直接处理验证码")
+                    # 直接跳到步骤6
+                    password_input = None  # 设为 None 跳过密码处理
+                    # password_input = None 会让下面的 if password_input 跳过，直接到步骤6
+            else:
+                # 尝试找密码输入框（只在非验证码页面执行）
+                password_input = None
+                for selector in [
+                    'input[type="password"]',
+                    'input[name="password"]',
+                    'input[autocomplete="new-password"]',
+                    'input[autocomplete="current-password"]',
+                ]:
+                    try:
+                        password_input = await page.wait_for_selector(selector, timeout=5000)
+                        if password_input:
+                            logger.info(f"✓ 找到密码输入框: {selector}")
+                            break
+                    except:
+                        continue
 
             if password_input:
                 if "创建密码" in page_text or "Create password" in page_text or "create a password" in page_text.lower() or "创建帐户" in page_text:
@@ -1268,11 +1586,11 @@ async def register_or_login_chatgpt(page, email: str, password: str, max_retries
                 pre_click_url = page.url
                 pre_click_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
 
-                # 点击继续按钮
+                # 点击继续按钮（使用精确匹配）
                 continue_clicked = False
                 for btn_selector in [
-                    'button:has-text("继续")',
-                    'button:has-text("Continue")',
+                    'button:text-is("继续")',      # 精确匹配
+                    'button:text-is("Continue")',  # 精确匹配
                     'button[type="submit"]',
                 ]:
                     try:
@@ -1328,7 +1646,7 @@ async def register_or_login_chatgpt(page, email: str, password: str, max_retries
                         pre_click_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
 
                         continue_btn = await page.query_selector(
-                            'button:has-text("继续"), button:has-text("Continue"), button[type="submit"]'
+                            'button:text-is("继续"), button:text-is("Continue"), button[type="submit"]'
                         )
                         if continue_btn:
                             await continue_btn.click()
@@ -1612,21 +1930,25 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
 
             context = contexts[0]
             page = None
+            already_in_auth_flow = False
 
-            # 查找 chatgpt 页面 - 只使用第一个找到的页面
+            # ⚠️ 2025-12-31 修复：优先查找 auth 页面（正在进行的登录流程），其次是 chatgpt 页面
+            # 这样可以避免中断已经进行到一半的登录流程
+            auth_pages = [pg for pg in context.pages if "auth.openai.com" in pg.url or "auth0.openai.com" in pg.url]
             chatgpt_pages = [pg for pg in context.pages if "chatgpt.com" in pg.url]
-            if chatgpt_pages:
+
+            if auth_pages:
+                # 发现 auth 页面 = 正在进行登录流程，不要中断！
+                page = auth_pages[0]
+                already_in_auth_flow = True
+                logger.info(f"✓ 发现正在进行的登录流程: {page.url}")
+            elif chatgpt_pages:
                 page = chatgpt_pages[0]
-                # 如果有多个 chatgpt 页面，关闭其他的
+                # 如果有多个 chatgpt 页面，只使用第一个，不关闭其他（关闭可能导致 CDP 连接问题）
                 if len(chatgpt_pages) > 1:
-                    logger.warning(f"发现 {len(chatgpt_pages)} 个 ChatGPT 页面，只使用第一个，关闭其他")
-                    for pg in chatgpt_pages[1:]:
-                        try:
-                            await pg.close()
-                        except:
-                            pass
+                    logger.info(f"发现 {len(chatgpt_pages)} 个 ChatGPT 页面，使用第一个")
             else:
-                # 没有 chatgpt 页面，创建新的
+                # 没有相关页面，创建新的
                 page = await context.new_page()
 
             logger.info(f"当前页面: {page.url}")
@@ -1668,23 +1990,56 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                 logger.info(f"  页面关键词: {[s for s in logged_in_signs if s in text_lower]}")
 
             else:
-                # ========== 每次新任务都必须先退出登录 ==========
-                # 无论当前是谁登录着，都要先退出，然后用选择的邮箱登录
-                logger.info("【新任务】先退出当前登录...")
-                await logout_chatgpt(page)
-                await asyncio.sleep(2)
+                # ========== CDP 全自动模式 ==========
+                # 流程：检查并退出上一个账号 → 自动注册/登录 → 验证
 
-                # ========== 用选择的邮箱登录/注册 ==========
-                logger.info(f"开始登录/注册: {email}")
+                # ⚠️ 2026-01-02 修复：无论是否在 auth 流程中，都检查并退出上一个账号
+                logger.info("【新任务】检查是否需要退出上一个账号...")
+                try:
+                    # 先导航到 chatgpt.com
+                    await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(1)
+
+                    # 检查是否已登录（有个人资料菜单且没有登录按钮）- 支持中英双语
+                    is_logged_in = False
+                    try:
+                        # 检查登录按钮（中英双语）
+                        has_login_btn = False
+                        for login_name in ["登录", "Log in", "Sign in"]:
+                            login_btn = page.get_by_role("button", name=login_name, exact=True)
+                            if await login_btn.count() > 0:
+                                has_login_btn = True
+                                break
+
+                        # 检查个人资料菜单（中英双语）
+                        has_profile = False
+                        for profile_name in ['打开"个人资料"菜单', 'Open profile menu', 'Profile', 'User menu']:
+                            profile_menu = page.get_by_role("button", name=profile_name)
+                            if await profile_menu.count() > 0:
+                                has_profile = True
+                                break
+
+                        # 没有登录按钮 + 有个人资料菜单 = 已登录
+                        is_logged_in = not has_login_btn and has_profile
+                    except Exception:
+                        pass
+
+                    if is_logged_in:
+                        logger.info("检测到已登录其他账号，执行退出操作...")
+                        await logout_chatgpt(page, timeout=20)
+                        logger.info("✓ 已退出上一个账号")
+                    else:
+                        logger.info("未检测到已登录账号，跳过退出")
+                except Exception as e:
+                    logger.warning(f"检查/退出登录出错，继续执行: {e}")
+
+                # 使用自动登录函数
                 password = get_account_password(email)
-                if not await register_or_login_chatgpt(page, email, password):
+                if not await auto_login_chatgpt(page, email, password):
                     logger.error("登录/注册失败")
                     return False
 
-                # 登录成功后导航到 veterans-claim
-                logger.info("导航到 veterans-claim 页面...")
-                await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
-                await asyncio.sleep(3)
+                # auto_login_chatgpt 已经导航到 veterans-claim，无需再导航
 
             logger.info(f"导航后页面: {page.url}")
 
@@ -2026,6 +2381,132 @@ async def run_verify_loop(email: str, logout_after_success: bool = False, chatgp
                 if state == "chatgpt_home":
                     await page.goto(VETERANS_CLAIM_URL)
                     await asyncio.sleep(3)
+                    continue
+
+                # ⚠️ 2026-01-01 新增：新用户引导页1 - "是什么促使你使用 ChatGPT？"
+                if state == "onboarding_purpose":
+                    logger.info("检测到新用户引导页面（用途选择），点击跳过...")
+                    try:
+                        skip_btn = page.locator('button:text-is("跳过"), button:text-is("Skip")')
+                        if await skip_btn.count() > 0:
+                            await skip_btn.click()
+                            logger.info("✓ 点击跳过按钮")
+                        else:
+                            # 如果没有跳过按钮，随便选一个然后下一步
+                            other_btn = page.locator('button:text-is("其他"), button:text-is("Other")')
+                            if await other_btn.count() > 0:
+                                await other_btn.click()
+                                await asyncio.sleep(0.5)
+                                next_btn = page.locator('button:text-is("下一步"), button:text-is("Next")')
+                                if await next_btn.count() > 0:
+                                    await next_btn.click()
+                    except Exception as e:
+                        logger.warning(f"引导页1处理失败: {e}")
+                    await asyncio.sleep(2)
+                    continue
+
+                # ⚠️ 2026-01-01 新增：新用户引导页2 - "你已准备就绪"
+                if state == "onboarding_ready":
+                    logger.info("检测到新用户引导页面（准备就绪），点击继续...")
+                    try:
+                        continue_btn = page.locator('button:text-is("继续"), button:text-is("Continue")')
+                        if await continue_btn.count() > 0:
+                            await continue_btn.click()
+                            logger.info("✓ 点击继续按钮")
+                    except Exception as e:
+                        logger.warning(f"引导页2处理失败: {e}")
+                    await asyncio.sleep(2)
+                    continue
+
+                # ⚠️ 2025-12-31 新增：新用户欢迎弹窗 - 关闭后继续
+                if state == "welcome_dialog":
+                    logger.info("检测到新用户欢迎弹窗，尝试关闭...")
+                    closed = False
+                    # 多种关闭方式尝试
+                    for btn_selector in [
+                        'button:has-text("开始使用")',
+                        'button:has-text("Get started")',
+                        'button:has-text("关闭")',
+                        'button:has-text("Close")',
+                        'button[aria-label="关闭"]',
+                        'button[aria-label="Close"]',
+                    ]:
+                        try:
+                            btn = page.locator(btn_selector).first
+                            if await btn.count() > 0:
+                                await btn.click()
+                                closed = True
+                                logger.info(f"✓ 点击关闭按钮: {btn_selector}")
+                                break
+                        except:
+                            continue
+                    if not closed:
+                        # 尝试按 Escape 关闭
+                        try:
+                            await page.keyboard.press("Escape")
+                            logger.info("✓ 按 Escape 关闭弹窗")
+                        except:
+                            pass
+                    await asyncio.sleep(2)
+                    # 导航到 veterans-claim
+                    await page.goto(VETERANS_CLAIM_URL)
+                    await asyncio.sleep(3)
+                    continue
+
+                # ⚠️ 2025-12-31 新增：验证码页面 - 需要获取验证码
+                if state == "email_verification":
+                    logger.info("检测到验证码页面，获取并填写验证码...")
+                    code = await get_chatgpt_verification_code(email)
+                    if code:
+                        logger.info(f"✓ 获取到验证码: {code}")
+                        # 查找验证码输入框
+                        code_input = None
+                        for selector in ['input[name="code"]', 'input[autocomplete="one-time-code"]', 'input[type="text"][maxlength="6"]', 'input[type="text"]']:
+                            try:
+                                code_input = await page.query_selector(selector)
+                                if code_input:
+                                    break
+                            except:
+                                continue
+                        if code_input:
+                            await code_input.fill(code)
+                            await asyncio.sleep(0.5)
+                            # 点击继续
+                            continue_btn = await page.query_selector('button:text-is("继续"), button:text-is("Continue"), button[type="submit"]')
+                            if continue_btn:
+                                await continue_btn.click()
+                                await asyncio.sleep(3)
+                    else:
+                        logger.warning("未能获取验证码，等待后重试...")
+                        await asyncio.sleep(10)
+                    continue
+
+                # ⚠️ 2025-12-31 新增：密码页面 - 继续登录流程
+                if state == "password_page":
+                    logger.info("检测到密码页面，继续登录流程...")
+                    password = get_account_password(email)
+                    if await register_or_login_chatgpt(page, email, password):
+                        logger.info("✓ 登录成功")
+                        await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.error("登录失败")
+                        return False
+                    continue
+
+                # ⚠️ 2025-12-31 新增：about-you 页面 - 填写年龄信息
+                if state == "about_you_page":
+                    logger.info("检测到 about-you 页面，填写年龄信息...")
+                    if await handle_about_you_page(page, email):
+                        logger.info("✓ about-you 处理完成")
+                        await asyncio.sleep(2)
+                        # 检查是否跳转到正确页面
+                        current_url = page.url
+                        if "chatgpt.com" not in current_url and "veterans-claim" not in current_url:
+                            await page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded")
+                            await asyncio.sleep(3)
+                    else:
+                        logger.warning("about-you 处理失败，尝试继续...")
                     continue
 
                 # OpenAI 登录页面 - 继续登录流程

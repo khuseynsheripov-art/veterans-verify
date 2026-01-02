@@ -60,6 +60,10 @@
                     <span class="text-gray-400 text-xs">({{ runningTask.mode }})</span>
                 </div>
                 <div class="flex gap-2">
+                    <button @click="showEmergencyLogin(runningTask.email)"
+                        class="bg-orange-600 hover:bg-orange-700 text-white px-4 py-1 rounded text-sm">
+                        🆘 应急登录
+                    </button>
                     <button @click="logoutChatgpt"
                         class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-1 rounded text-sm">
                         退出登录
@@ -77,6 +81,84 @@
             <div class="bg-gray-900 rounded p-3 h-40 overflow-y-auto font-mono text-xs" ref="logContainer">
                 <div v-for="(log, idx) in runningTask.logs" :key="idx" class="text-gray-300">{{ log }}</div>
                 <div v-if="!runningTask.logs || runningTask.logs.length === 0" class="text-gray-500">等待日志...</div>
+            </div>
+        </div>
+
+        <!-- 应急登录模态框 -->
+        <div v-if="emergencyModal.show" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50" @click.self="emergencyModal.show = false">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-lg w-full mx-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-semibold text-orange-400">🆘 应急手动登录</h3>
+                    <button @click="emergencyModal.show = false" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+                </div>
+
+                <div v-if="emergencyModal.loading" class="text-center py-8 text-gray-400">加载中...</div>
+                <div v-else>
+                    <!-- 说明 -->
+                    <div class="bg-orange-900/30 border border-orange-600 rounded p-3 mb-4">
+                        <div class="text-orange-300 text-sm">
+                            脚本卡住时，可手动登录后继续验证：
+                        </div>
+                    </div>
+
+                    <!-- ChatGPT 登录信息 -->
+                    <div class="bg-gray-700 rounded p-4 mb-4">
+                        <h4 class="text-white font-semibold mb-3">1. ChatGPT 登录信息</h4>
+                        <div class="space-y-2 text-sm">
+                            <div class="flex items-center gap-2">
+                                <div class="text-gray-400 w-16">邮箱:</div>
+                                <div class="text-white font-mono flex-1 bg-gray-800 px-2 py-1 rounded select-all">{{ emergencyModal.email }}</div>
+                                <button @click="copyText(emergencyModal.email)" class="text-blue-400 hover:text-blue-300 text-xs">复制</button>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <div class="text-gray-400 w-16">密码:</div>
+                                <div class="text-green-400 font-mono flex-1 bg-gray-800 px-2 py-1 rounded select-all">{{ emergencyModal.password }}</div>
+                                <button @click="copyText(emergencyModal.password)" class="text-blue-400 hover:text-blue-300 text-xs">复制</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 注册信息（姓名+生日）-->
+                    <div v-if="emergencyModal.profileData" class="bg-blue-900/30 border border-blue-600/50 rounded p-4 mb-4">
+                        <h4 class="text-blue-400 font-semibold mb-3">2. 注册信息（如果要求填写）</h4>
+                        <div class="grid grid-cols-2 gap-2 text-sm">
+                            <div class="flex items-center gap-2">
+                                <div class="text-gray-400 w-12">姓名:</div>
+                                <div class="text-white font-mono bg-gray-800 px-2 py-1 rounded select-all">{{ emergencyModal.profileData.first_name }} {{ emergencyModal.profileData.last_name }}</div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <div class="text-gray-400 w-12">生日:</div>
+                                <div class="text-white font-mono bg-gray-800 px-2 py-1 rounded select-all">{{ emergencyModal.profileData.birth_month }} {{ emergencyModal.profileData.birth_day }}, {{ emergencyModal.profileData.birth_year }}</div>
+                            </div>
+                        </div>
+                        <div class="text-gray-400 text-xs mt-2">⚠️ 注册 ChatGPT 时要求填写姓名/生日时使用（保持一致）</div>
+                    </div>
+
+                    <!-- 登录步骤 -->
+                    <div class="bg-gray-700 rounded p-4 mb-4">
+                        <h4 class="text-white font-semibold mb-2">3. 登录步骤</h4>
+                        <div class="text-gray-300 text-sm space-y-1">
+                            <div>① 打开 <a href="https://chatgpt.com/veterans-claim" target="_blank" class="text-blue-400 underline">veterans-claim</a></div>
+                            <div>② 点击 "登录" 按钮</div>
+                            <div>③ 输入邮箱和密码（注册时用上面的姓名/生日）</div>
+                            <div>④ 如需验证码，访问 <a href="https://one.009025.xyz/" target="_blank" class="text-blue-400 underline">临时邮箱</a> 获取</div>
+                            <div>⑤ 登录成功后点击下方按钮继续</div>
+                        </div>
+                    </div>
+
+                    <!-- 操作按钮 -->
+                    <div class="flex gap-3">
+                        <button @click="manualContinueVerify()"
+                            :disabled="emergencyModal.continuing"
+                            class="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white py-3 rounded font-semibold">
+                            {{ emergencyModal.continuing ? '继续中...' : '✓ 我已登录，继续验证' }}
+                        </button>
+                        <button @click="emergencyModal.show = false"
+                            class="bg-gray-600 hover:bg-gray-500 text-white px-4 py-3 rounded">
+                            关闭
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -127,6 +209,18 @@
                                     class="bg-gray-700 rounded p-3 flex justify-between items-center">
                                     <div class="flex-1 min-w-0">
                                         <div class="text-white text-sm font-mono truncate">{{ email.address }}</div>
+                                        <!-- ChatGPT 登录密码 -->
+                                        <div v-if="email.password" class="text-xs text-green-400 font-mono mt-0.5">
+                                            <span class="text-gray-400">密码:</span> {{ email.password }}
+                                            <button @click="copyText(email.password)" class="text-blue-400 hover:text-blue-300 ml-1">复制</button>
+                                        </div>
+                                        <!-- 注册信息：姓名+生日（可复制） -->
+                                        <div v-if="email.first_name" class="text-xs text-yellow-400 font-mono mt-0.5">
+                                            <span class="text-gray-400">姓名:</span> {{ email.first_name }} {{ email.last_name }}
+                                            <button @click="copyText(email.first_name + ' ' + email.last_name)" class="text-blue-400 hover:text-blue-300 ml-1">复制</button>
+                                            <span class="text-gray-400 ml-2">生日:</span> {{ email.birth_month }} {{ email.birth_day }}, {{ email.birth_year }}
+                                            <button @click="copyText(email.birth_month + ' ' + email.birth_day + ', ' + email.birth_year)" class="text-blue-400 hover:text-blue-300 ml-1">复制</button>
+                                        </div>
                                         <div class="flex items-center gap-2 mt-1">
                                             <span class="text-xs px-2 py-0.5 rounded"
                                                 :class="{
@@ -167,7 +261,165 @@
                     </div>
                 </div>
 
-                <!-- 模式2: 全自动（支持批量） -->
+                <!-- 模式2: 代理管理 -->
+                <div v-if="currentMode === 'proxy_manage'">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <!-- 左侧：添加代理 -->
+                        <div>
+                            <h3 class="text-white font-semibold mb-4">添加代理</h3>
+
+                            <!-- Tab 切换：粘贴 vs 上传 -->
+                            <div class="flex gap-2 mb-4">
+                                <button @click="proxyInputMethod = 'paste'"
+                                    :class="proxyInputMethod === 'paste' ? 'bg-blue-600' : 'bg-gray-700'"
+                                    class="px-4 py-2 rounded text-white text-sm">
+                                    粘贴代理
+                                </button>
+                                <button @click="proxyInputMethod = 'upload'"
+                                    :class="proxyInputMethod === 'upload' ? 'bg-blue-600' : 'bg-gray-700'"
+                                    class="px-4 py-2 rounded text-white text-sm">
+                                    上传文件
+                                </button>
+                            </div>
+
+                            <!-- 粘贴模式 -->
+                            <div v-if="proxyInputMethod === 'paste'">
+                                <label class="block text-gray-400 text-sm mb-2">代理列表（每行一个）</label>
+                                <textarea v-model="proxyText" rows="8"
+                                    placeholder="支持格式：&#10;ip:port&#10;ip:port:user:pass&#10;user:pass@ip:port&#10;http://ip:port&#10;socks5://user:pass@ip:port"
+                                    class="w-full bg-gray-700 text-white rounded p-2 text-sm font-mono"></textarea>
+
+                                <div class="flex items-center gap-2 mt-3">
+                                    <label class="text-gray-400 text-sm">协议类型：</label>
+                                    <select v-model="proxyProtocol" class="bg-gray-700 text-white rounded px-3 py-1 text-sm">
+                                        <option value="http">HTTP</option>
+                                        <option value="https">HTTPS</option>
+                                        <option value="socks5">SOCKS5</option>
+                                    </select>
+                                    <button @click="parseProxyText" :disabled="!proxyText || proxyParsing"
+                                        class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-1 rounded text-sm ml-auto">
+                                        {{ proxyParsing ? '解析中...' : '解析并预览' }}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- 上传模式 -->
+                            <div v-if="proxyInputMethod === 'upload'">
+                                <label class="block text-gray-400 text-sm mb-2">选择代理文件（.txt）</label>
+                                <input type="file" @change="handleProxyFileChange" accept=".txt"
+                                    class="w-full bg-gray-700 text-white rounded p-2 text-sm">
+
+                                <div class="flex items-center gap-2 mt-3">
+                                    <label class="text-gray-400 text-sm">协议类型：</label>
+                                    <select v-model="proxyProtocol" class="bg-gray-700 text-white rounded px-3 py-1 text-sm">
+                                        <option value="http">HTTP</option>
+                                        <option value="https">HTTPS</option>
+                                        <option value="socks5">SOCKS5</option>
+                                    </select>
+                                    <button @click="uploadProxyFile" :disabled="!proxyFile || proxyParsing"
+                                        class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-1 rounded text-sm ml-auto">
+                                        {{ proxyParsing ? '上传中...' : '上传并解析' }}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- 解析结果 -->
+                            <div v-if="proxyParsedList.length > 0" class="mt-4">
+                                <div class="bg-green-900/30 border border-green-600/50 rounded p-3 mb-2">
+                                    <div class="text-green-400 text-sm">
+                                        ✅ 成功解析 {{ proxyParsedList.length }} 个代理
+                                    </div>
+                                </div>
+                                <div class="bg-gray-700 rounded p-3 max-h-40 overflow-y-auto">
+                                    <div v-for="(proxy, idx) in proxyParsedList.slice(0, 10)" :key="idx"
+                                        class="text-gray-300 text-xs font-mono">
+                                        {{ proxy }}
+                                    </div>
+                                    <div v-if="proxyParsedList.length > 10" class="text-gray-500 text-xs mt-2">
+                                        ...还有 {{ proxyParsedList.length - 10 }} 个
+                                    </div>
+                                </div>
+                                <button @click="saveProxyList"
+                                    class="w-full bg-green-600 hover:bg-green-700 text-white py-2 rounded mt-3">
+                                    保存到代理池
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 右侧：代理池状态 -->
+                        <div>
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="text-white font-semibold">代理池状态</h3>
+                                <button @click="loadProxyStats"
+                                    class="text-blue-400 hover:text-blue-300 text-sm">
+                                    🔄 刷新
+                                </button>
+                            </div>
+
+                            <!-- 统计卡片 -->
+                            <div class="grid grid-cols-2 gap-3 mb-4">
+                                <div class="bg-gray-700 rounded p-3">
+                                    <div class="text-gray-400 text-xs">总代理数</div>
+                                    <div class="text-2xl font-bold text-white">{{ proxyStats.pool?.total || 0 }}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded p-3">
+                                    <div class="text-gray-400 text-xs">可用代理</div>
+                                    <div class="text-2xl font-bold text-green-400">{{ proxyStats.pool?.available || 0 }}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded p-3">
+                                    <div class="text-gray-400 text-xs">失败冷却</div>
+                                    <div class="text-2xl font-bold text-red-400">{{ proxyStats.pool?.bad || 0 }}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded p-3">
+                                    <div class="text-gray-400 text-xs">分配策略</div>
+                                    <div class="text-sm font-bold text-blue-400">{{ proxyStats.pool?.strategy || '-' }}</div>
+                                </div>
+                            </div>
+
+                            <!-- 主代理 -->
+                            <div class="bg-yellow-900/30 border border-yellow-600/50 rounded p-3 mb-4">
+                                <div class="text-yellow-400 text-sm font-semibold mb-1">主代理（Fallback）</div>
+                                <div class="text-gray-300 text-xs font-mono break-all">
+                                    {{ proxyStats.main_proxy || '未配置' }}
+                                </div>
+                            </div>
+
+                            <!-- 代理模式 -->
+                            <div class="bg-gray-700 rounded p-3 mb-4">
+                                <div class="text-gray-400 text-xs mb-2">代理模式</div>
+                                <div class="text-white text-sm">
+                                    <span v-if="proxyStats.mode === 'pool_with_fallback'">
+                                        🔄 代理池优先，失败时用主代理（推荐）
+                                    </span>
+                                    <span v-else-if="proxyStats.mode === 'pool_only'">
+                                        📋 只使用代理池
+                                    </span>
+                                    <span v-else-if="proxyStats.mode === 'main_only'">
+                                        🔒 只使用主代理
+                                    </span>
+                                    <span v-else>-</span>
+                                </div>
+                            </div>
+
+                            <!-- 代理列表（前10个）-->
+                            <div>
+                                <div class="text-gray-400 text-sm mb-2">当前可用代理（前10个）</div>
+                                <div class="bg-gray-700 rounded p-3 max-h-48 overflow-y-auto">
+                                    <div v-for="(proxy, idx) in (proxyStats.pool?.proxies || []).slice(0, 10)" :key="idx"
+                                        class="text-gray-300 text-xs font-mono mb-1">
+                                        {{ idx + 1 }}. {{ proxy }}
+                                    </div>
+                                    <div v-if="!proxyStats.pool?.proxies || proxyStats.pool.proxies.length === 0"
+                                        class="text-gray-500 text-sm text-center py-4">
+                                        暂无可用代理
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 模式3: 全自动（支持批量） -->
                 <div v-if="currentMode === 'full_auto'">
                     <div class="bg-green-900/30 border border-green-600/50 rounded-lg p-3 mb-4">
                         <div class="text-green-400 font-semibold">批量验证模式</div>
@@ -205,45 +457,124 @@
                         <div class="text-gray-300 text-sm">验证单个 ChatGPT 账号，成功后暂停（可用于已有账号或邮箱池账号）</div>
                     </div>
 
-                    <!-- 账号类型选择 -->
+                    <!-- 验证模式选择 -->
                     <div class="mb-4">
-                        <label class="block text-gray-400 text-sm mb-2">账号类型</label>
-                        <div class="flex gap-4">
+                        <label class="block text-gray-400 text-sm mb-2">验证模式</label>
+                        <div class="flex flex-wrap gap-3">
+                            <!-- 可视化调试（Camoufox 有窗口，推荐）-->
                             <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
-                                :class="singleVerifyMode === 'cdp' ? 'ring-2 ring-blue-500' : ''">
-                                <input type="radio" v-model="singleVerifyMode" value="cdp" class="mr-2">
+                                :class="singleVerifyMode === 'visual' ? 'ring-2 ring-green-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="visual" class="mr-2">
                                 <div>
-                                    <div class="font-semibold">临时邮箱账号（推荐）</div>
-                                    <div class="text-xs text-gray-400">注册 = 接收 = 同一个临时邮箱</div>
+                                    <div class="font-semibold text-green-400">🖥️ 可视化调试（推荐）</div>
+                                    <div class="text-xs text-gray-400">Camoufox 有窗口，每次新指纹</div>
                                 </div>
                             </label>
+                            <!-- 全自动后台（Camoufox 无头）-->
                             <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
-                                :class="singleVerifyMode === 'camoufox' ? 'ring-2 ring-blue-500' : ''">
-                                <input type="radio" v-model="singleVerifyMode" value="camoufox" class="mr-2">
+                                :class="singleVerifyMode === 'headless' ? 'ring-2 ring-blue-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="headless" class="mr-2">
                                 <div>
-                                    <div class="font-semibold">自有账号（消耗临时邮箱）</div>
-                                    <div class="text-xs text-gray-400">用自有邮箱登录，消耗一个临时邮箱</div>
+                                    <div class="font-semibold">🤖 全自动后台</div>
+                                    <div class="text-xs text-gray-400">Camoufox 无头，完全后台</div>
+                                </div>
+                            </label>
+                            <!-- 自有账号模式 -->
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleVerifyMode === 'own_account' ? 'ring-2 ring-orange-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="own_account" class="mr-2">
+                                <div>
+                                    <div class="font-semibold text-orange-400">📧 自有账号</div>
+                                    <div class="text-xs text-gray-400">Gmail等，需手动输入验证码</div>
+                                </div>
+                            </label>
+                            <!-- CDP 手动登录（推荐调试）-->
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleVerifyMode === 'cdp_manual' ? 'ring-2 ring-blue-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="cdp_manual" class="mr-2">
+                                <div>
+                                    <div class="font-semibold text-blue-400">🔑 CDP 手动登录</div>
+                                    <div class="text-xs text-gray-400">你手动登录，脚本自动验证</div>
+                                </div>
+                            </label>
+                            <!-- CDP 全自动（保留）-->
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleVerifyMode === 'cdp' ? 'ring-2 ring-gray-500' : ''">
+                                <input type="radio" v-model="singleVerifyMode" value="cdp" class="mr-2">
+                                <div>
+                                    <div class="font-semibold text-gray-400">🔌 CDP 全自动</div>
+                                    <div class="text-xs text-gray-500">脚本自动登录（固定指纹）</div>
                                 </div>
                             </label>
                         </div>
                     </div>
 
-                    <!-- 临时邮箱账号模式提示 -->
-                    <div v-if="singleVerifyMode === 'cdp'" class="bg-gray-700 rounded p-3 mb-4">
-                        <div class="text-white font-semibold mb-2 text-sm">操作说明：</div>
+                    <!-- 可视化调试模式提示（推荐） -->
+                    <div v-if="singleVerifyMode === 'visual'" class="bg-green-900/30 border border-green-600/50 rounded p-3 mb-4">
+                        <div class="text-green-400 font-semibold mb-2 text-sm">可视化调试模式（推荐）</div>
                         <div class="text-gray-300 text-xs space-y-1">
-                            <div>1. 运行 <code class="bg-gray-600 px-1 rounded">scripts/start-chrome-devtools.bat</code></div>
-                            <div>2. 选择临时邮箱，脚本自动退出旧账号</div>
-                            <div>3. 用此邮箱自动登录并完成验证</div>
+                            <div>1. 从邮箱池选择临时邮箱</div>
+                            <div>2. 自动启动 Camoufox 浏览器（有窗口）</div>
+                            <div>3. <span class="text-green-400">每次自动生成新指纹</span>（解决固定指纹问题）</div>
+                            <div>4. 你可以实时看到浏览器操作过程</div>
+                            <div>5. 验证码自动从临时邮箱获取</div>
+                        </div>
+                    </div>
+
+                    <!-- 全自动后台模式提示 -->
+                    <div v-if="singleVerifyMode === 'headless'" class="bg-blue-900/30 border border-blue-600/50 rounded p-3 mb-4">
+                        <div class="text-blue-400 font-semibold mb-2 text-sm">全自动后台模式</div>
+                        <div class="text-gray-300 text-xs space-y-1">
+                            <div>1. 从邮箱池选择临时邮箱</div>
+                            <div>2. Camoufox 无头模式（完全后台）</div>
+                            <div>3. 每次自动生成新指纹</div>
+                            <div>4. 验证码自动从临时邮箱获取</div>
+                            <div>5. 适合批量运行，不占用屏幕</div>
+                        </div>
+                    </div>
+
+                    <!-- CDP 手动登录模式提示（推荐调试）-->
+                    <div v-if="singleVerifyMode === 'cdp_manual'" class="bg-blue-900/30 border border-blue-600/50 rounded p-3 mb-4">
+                        <div class="text-blue-400 font-semibold mb-2 text-sm">🔑 CDP 手动登录模式（推荐调试）</div>
+                        <div class="text-gray-300 text-xs space-y-1">
+                            <div>1. 启动 Chrome: <code class="bg-gray-700 px-1">scripts\start-chrome-devtools.bat</code></div>
+                            <div>2. <span class="text-green-400">你手动登录 ChatGPT</span>（确保登录成功）</div>
+                            <div>3. 点击"开始验证" → 脚本自动完成 SheerID 验证</div>
+                            <div>4. 适合调试：脚本只负责填表验证，登录由你控制</div>
+                        </div>
+                    </div>
+
+                    <!-- CDP 全自动模式提示 -->
+                    <div v-if="singleVerifyMode === 'cdp'" class="bg-gray-800/50 border border-gray-600/50 rounded p-3 mb-4">
+                        <div class="text-gray-400 font-semibold mb-2 text-sm">🔌 CDP 全自动模式</div>
+                        <div class="text-gray-400 text-xs space-y-1">
+                            <div>1. 请先启动 Chrome: <code class="bg-gray-700 px-1">scripts\start-chrome-devtools.bat</code></div>
+                            <div>2. 脚本自动登录/注册 + 验证</div>
+                            <div>3. <span class="text-orange-400">⚠️ 固定指纹，多次使用容易被风控</span></div>
+                            <div>4. 适用于全自动场景</div>
+                        </div>
+                    </div>
+
+                    <!-- 临时邮箱账号模式提示（保留兼容性，实际已被 visual/headless 替代） -->
+                    <div v-if="singleVerifyMode === 'temp_email'" class="bg-blue-900/30 border border-blue-600/50 rounded p-3 mb-4">
+                        <div class="text-blue-400 font-semibold mb-2 text-sm">Camoufox 全自动模式</div>
+                        <div class="text-gray-300 text-xs space-y-1">
+                            <div>1. 从邮箱池选择临时邮箱</div>
+                            <div>2. 脚本自动登录/注册 ChatGPT</div>
+                            <div>3. 验证码自动从临时邮箱获取</div>
+                            <div>4. SheerID 验证完全自动化</div>
                         </div>
                     </div>
 
                     <!-- 自有账号模式：需要账号密码 + 临时邮箱 -->
-                    <div v-if="singleVerifyMode === 'camoufox'">
+                    <div v-if="singleVerifyMode === 'own_account'">
                         <div class="bg-orange-900/30 border border-orange-600/50 rounded p-3 mb-4">
-                            <div class="text-orange-400 text-xs">
-                                自有账号登录后，需要消耗一个临时邮箱来接收验证链接。
-                                验证成功后 Plus 给自有账号，临时邮箱标记为已消耗。
+                            <div class="text-orange-400 font-semibold mb-1 text-sm">会弹出浏览器窗口，需手动输入验证码</div>
+                            <div class="text-orange-300 text-xs space-y-1">
+                                <div>1. 点击开始后会弹出真实的浏览器窗口</div>
+                                <div>2. ChatGPT 验证码发到你的邮箱（如 Gmail），在窗口中输入</div>
+                                <div>3. SheerID 链接发到临时邮箱，自动点击</div>
+                                <div>4. 成功后 Plus 给你的自有账号</div>
                             </div>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -259,10 +590,50 @@
                         </div>
                     </div>
 
+                    <!-- 代理模式选择 -->
+                    <div class="mb-4" v-if="singleVerifyMode !== 'cdp'">
+                        <label class="block text-gray-400 text-sm mb-2">代理设置</label>
+                        <div class="flex flex-wrap gap-3 mb-2">
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleProxyMode === 'none' ? 'ring-2 ring-green-500' : ''">
+                                <input type="radio" v-model="singleProxyMode" value="none" class="mr-2">
+                                <div>
+                                    <div class="font-semibold text-green-400">🌐 直连（推荐测试）</div>
+                                    <div class="text-xs text-gray-400">不使用代理</div>
+                                </div>
+                            </label>
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleProxyMode === 'fixed' ? 'ring-2 ring-blue-500' : ''">
+                                <input type="radio" v-model="singleProxyMode" value="fixed" class="mr-2">
+                                <div>
+                                    <div class="font-semibold text-blue-400">📍 固定代理</div>
+                                    <div class="text-xs text-gray-400">指定代理地址</div>
+                                </div>
+                            </label>
+                            <label class="flex items-center text-gray-300 text-sm cursor-pointer bg-gray-700 px-4 py-2 rounded"
+                                :class="singleProxyMode === 'pool' ? 'ring-2 ring-purple-500' : ''">
+                                <input type="radio" v-model="singleProxyMode" value="pool" class="mr-2">
+                                <div>
+                                    <div class="font-semibold text-purple-400">🔄 代理池轮换</div>
+                                    <div class="text-xs text-gray-400">从池中选择（{{ proxyStats.pool?.available || 0 }} 可用）</div>
+                                </div>
+                            </label>
+                        </div>
+                        <!-- 固定代理输入框 -->
+                        <div v-if="singleProxyMode === 'fixed'" class="mt-2">
+                            <input v-model="singleFixedProxy" type="text"
+                                placeholder="http://user:pass@ip:port 或 socks5://ip:port"
+                                class="w-full bg-gray-700 text-white px-3 py-2 rounded text-sm font-mono">
+                        </div>
+                    </div>
+                    <div v-else class="bg-gray-700 rounded p-3 mb-4 text-gray-400 text-sm">
+                        <span class="text-yellow-400">⚠️ CDP 模式</span>：代理由已打开的浏览器管理
+                    </div>
+
                     <!-- 临时邮箱选择（两种模式都需要，但用途不同） -->
                     <div class="mb-4">
                         <label class="block text-gray-400 text-sm mb-2">
-                            {{ singleVerifyMode === 'cdp' ? '临时邮箱（注册 + 接收链接）' : '临时邮箱（消耗：只用于接收链接）' }}
+                            {{ singleVerifyMode === 'temp_email' ? '临时邮箱（登录 + 接收链接）' : '临时邮箱（只用于接收 SheerID 链接）' }}
                         </label>
                         <div class="flex gap-4 mb-2">
                             <label class="flex items-center text-gray-300 text-sm cursor-pointer">
@@ -339,6 +710,8 @@
                             <th class="pb-3">邮箱</th>
                             <th class="pb-3">密码</th>
                             <th class="pb-3">状态</th>
+                            <th class="pb-3">代理</th>
+                            <th class="pb-3">Profile</th>
                             <th class="pb-3">备注</th>
                             <th class="pb-3">操作</th>
                         </tr>
@@ -350,8 +723,22 @@
                             <td class="py-3">
                                 <span :class="getStatusClass(acc.status)" class="px-2 py-1 rounded text-xs">{{ acc.status }}</span>
                             </td>
+                            <td class="py-3 text-xs text-gray-400 max-w-xs truncate" :title="acc.proxy || '-'">
+                                <span v-if="acc.proxy" class="text-purple-400">{{ acc.proxy.split('://')[1]?.split('@')[1] || acc.proxy.split('://')[1]?.split(':')[0] || acc.proxy.substring(0, 20) }}...</span>
+                                <span v-else>-</span>
+                            </td>
+                            <td class="py-3 text-xs">
+                                <span v-if="acc.profile_path" class="text-blue-400" :title="acc.profile_path">✓</span>
+                                <span v-else class="text-gray-600">-</span>
+                            </td>
                             <td class="py-3 text-xs text-gray-400 max-w-xs truncate">{{ acc.note || '-' }}</td>
-                            <td class="py-3 flex gap-2">
+                            <td class="py-3 flex gap-2 items-center">
+                                <select :value="acc.tag || 'unused'" @change="updateAccountTag(acc.email, $event.target.value)"
+                                    class="bg-gray-700 text-white text-xs px-2 py-1 rounded border-0">
+                                    <option value="unused">未使用</option>
+                                    <option value="sold">已售出</option>
+                                    <option value="used">已使用</option>
+                                </select>
                                 <button @click="showAccountDetail(acc.email)"
                                     class="text-green-400 hover:text-green-300 text-sm">详情</button>
                                 <button @click="selectedEmail = acc.email; prepareVerify()"
@@ -405,6 +792,10 @@
                             <div class="text-green-400 font-mono">{{ detailModal.account.password }}</div>
                             <div class="text-gray-400">状态:</div>
                             <div><span :class="getStatusClass(detailModal.account.status)" class="px-2 py-1 rounded text-xs">{{ detailModal.account.status }}</span></div>
+                            <div v-if="detailModal.account.proxy" class="text-gray-400">代理:</div>
+                            <div v-if="detailModal.account.proxy" class="text-purple-400 font-mono text-xs break-all">{{ detailModal.account.proxy }}</div>
+                            <div v-if="detailModal.account.profile_path" class="text-gray-400">Profile 路径:</div>
+                            <div v-if="detailModal.account.profile_path" class="text-blue-400 font-mono text-xs break-all">{{ detailModal.account.profile_path }}</div>
                             <div v-if="detailModal.account.profile_name" class="text-gray-400">注册姓名:</div>
                             <div v-if="detailModal.account.profile_name" class="text-white">{{ detailModal.account.profile_name }}</div>
                             <div v-if="detailModal.account.profile_birthday" class="text-gray-400">注册生日:</div>
@@ -475,13 +866,22 @@
             const accountStats = ref({});
             const verStats = ref({});
 
-            // 模式（简化为3个）
+            // 模式（4个）
             const modes = [
                 { id: 'email_pool', name: '邮箱池' },
+                { id: 'proxy_manage', name: '代理管理' },
                 { id: 'full_auto', name: '全自动批量' },
                 { id: 'single_verify', name: '单账号验证' }
             ];
             const currentMode = ref('email_pool');
+
+            // 代理管理
+            const proxyStats = ref({});
+            const proxyText = ref('');
+            const proxyProtocol = ref('http');
+            const proxyFile = ref(null);
+            const proxyParsedList = ref([]);
+            const proxyParsing = ref(false);
 
             // 邮箱池
             const emailPool = ref([]);
@@ -497,7 +897,7 @@
             const batchSuccessCount = ref(1);  // 成功N个后暂停
 
             // 单账号验证（合并原来的半自动模式）
-            const singleVerifyMode = ref('cdp');  // cdp（手动登录后接管）或 camoufox（脚本登录）
+            const singleVerifyMode = ref('visual');  // visual（可视化推荐）、headless（后台）、own_account（自有账号）、cdp（高级）
             const singleChatgptEmail = ref('');   // ChatGPT 账号（脚本登录时需要）
             const singleChatgptPassword = ref('');
             const singleEmailSource = ref('pool');  // pool 或 manual
@@ -505,6 +905,8 @@
             const singleManualEmail = ref('');      // 手动输入邮箱
             const singleManualJwt = ref('');        // 手动输入 JWT
             const singleRunning = ref(false);
+            const singleProxyMode = ref('none');    // none/fixed/pool 代理模式
+            const singleFixedProxy = ref('');       // 固定代理地址
 
             // 运行中任务
             const runningTask = ref(null);
@@ -517,6 +919,17 @@
                 account: null,
                 verifications: [],
                 successVerification: null  // 成功的验证记录
+            });
+
+            // 应急登录模态框
+            const emergencyModal = ref({
+                show: false,
+                loading: false,
+                continuing: false,
+                email: '',
+                password: '',
+                jwt: '',
+                profileData: null  // 注册信息（姓名、生日）
             });
 
             // 时间格式化
@@ -619,6 +1032,27 @@
                         accounts.value = data.accounts || [];
                     }
                 } catch (e) {}
+            };
+
+            const updateAccountTag = async (email, tag) => {
+                try {
+                    const res = await fetch(`/api/accounts/${encodeURIComponent(email)}/tag`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tag })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog(`标签已更新: ${email} → ${tag}`, 'success');
+                        // 更新本地数据
+                        const acc = accounts.value.find(a => a.email === email);
+                        if (acc) acc.tag = tag;
+                    } else {
+                        addLog(data.error || '更新失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('更新标签失败', 'error');
+                }
             };
 
             const createEmails = async () => {
@@ -805,20 +1239,35 @@ JWT Token: ${acc.jwt}`;
             };
 
             // 启动验证任务
-            const startVerifyTask = async (email, mode = 'cdp', headless = false) => {
+            const startVerifyTask = async (email, mode = 'cdp', headless = false, proxyMode = 'none', fixedProxy = '') => {
                 if (!email) {
                     addLog('请选择邮箱', 'error');
+                    return false;
+                }
+                // 固定代理模式校验
+                if (proxyMode === 'fixed' && !fixedProxy) {
+                    addLog('请输入固定代理地址', 'error');
                     return false;
                 }
                 try {
                     const res = await fetch('/api/verify/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email, mode, headless })
+                        body: JSON.stringify({
+                            email,
+                            mode,
+                            headless,
+                            proxy_mode: proxyMode,
+                            fixed_proxy: fixedProxy
+                        })
                     });
                     const data = await res.json();
                     if (data.success) {
-                        addLog(`验证任务已启动: ${email} (${mode})`, 'success');
+                        let proxyInfo = '';
+                        if (data.proxy_mode === 'none') proxyInfo = '直连';
+                        else if (data.proxy_mode === 'fixed') proxyInfo = '固定代理';
+                        else if (data.proxy_mode === 'pool') proxyInfo = '代理池';
+                        addLog(`验证任务已启动: ${email} (${mode}, ${proxyInfo})`, 'success');
                         // 开始轮询状态
                         pollTaskStatus(email);
                         return true;
@@ -842,6 +1291,29 @@ JWT Token: ${acc.jwt}`;
                 const poll = async () => {
                     try {
                         const res = await fetch(`/api/verify/status/${encodeURIComponent(email)}`);
+
+                        // 检查 HTTP 状态码
+                        if (res.status === 401) {
+                            addLog('⚠️ 前端 Session 过期，但脚本可能仍在后台运行', 'warning');
+                            addLog('👉 请检查 Chrome 窗口查看实际进度', 'info');
+                            addLog('👉 如需继续监控，请刷新页面后重新登录', 'info');
+                            clearInterval(taskPollTimer);
+                            taskPollTimer = null;
+                            // 不清理 runningTask，让用户知道任务可能还在
+                            return;
+                        }
+
+                        // 任务不存在（404）- 清理前端状态
+                        if (res.status === 404) {
+                            addLog(`任务已结束或不存在: ${email}`, 'info');
+                            runningTask.value = null;
+                            fullAutoRunning.value = false;
+                            singleRunning.value = false;
+                            clearInterval(taskPollTimer);
+                            taskPollTimer = null;
+                            return;
+                        }
+
                         const data = await res.json();
                         if (data.success && data.task) {
                             const task = data.task;
@@ -864,7 +1336,10 @@ JWT Token: ${acc.jwt}`;
                                 clearInterval(taskPollTimer);
                                 taskPollTimer = null;
                                 fetchStatus();
+                                fetchAccounts();  // 刷新账号列表
+                                fetchEmailPool();  // 刷新邮箱池
                             } else {
+                                // stopped, error, failed 等状态
                                 addLog(`任务结束: ${task.status} - ${task.error || ''}`, task.status === 'error' ? 'error' : 'info');
                                 runningTask.value = null;
                                 fullAutoRunning.value = false;
@@ -872,9 +1347,19 @@ JWT Token: ${acc.jwt}`;
                                 clearInterval(taskPollTimer);
                                 taskPollTimer = null;
                             }
+                        } else if (!data.success) {
+                            // API 返回失败（可能任务已结束）
+                            addLog(`任务状态查询失败: ${data.error || '未知错误'}`, 'warning');
+                            runningTask.value = null;
+                            fullAutoRunning.value = false;
+                            singleRunning.value = false;
+                            clearInterval(taskPollTimer);
+                            taskPollTimer = null;
                         }
                     } catch (e) {
                         console.error('Poll error:', e);
+                        // 网络错误时也清理状态，避免一直轮询
+                        addLog('状态查询网络错误', 'error');
                     }
                 };
 
@@ -886,13 +1371,32 @@ JWT Token: ${acc.jwt}`;
             // 停止任务
             const stopTask = async (email) => {
                 if (!confirm('确定要停止任务吗？')) return;
+                addLog(`正在停止任务: ${email}...`, 'info');
                 try {
                     const res = await fetch(`/api/verify/stop/${encodeURIComponent(email)}`, {
                         method: 'POST'
                     });
+                    // 检查 HTTP 状态码
+                    if (res.status === 401) {
+                        addLog('Session 过期，请刷新页面重新登录', 'error');
+                        setTimeout(() => window.location.reload(), 2000);
+                        return;
+                    }
+                    if (res.status === 404) {
+                        addLog('任务不存在或已结束，正在清理状态...', 'warning');
+                        // 强制清理前端状态
+                        runningTask.value = null;
+                        fullAutoRunning.value = false;
+                        singleRunning.value = false;
+                        if (taskPollTimer) {
+                            clearInterval(taskPollTimer);
+                            taskPollTimer = null;
+                        }
+                        return;
+                    }
                     const data = await res.json();
                     if (data.success) {
-                        addLog(`任务已停止: ${email}`, 'info');
+                        addLog(`✓ 任务已停止: ${email}`, 'success');
                         runningTask.value = null;
                         fullAutoRunning.value = false;
                         singleRunning.value = false;
@@ -904,25 +1408,31 @@ JWT Token: ${acc.jwt}`;
                         addLog(data.error || '停止失败', 'error');
                     }
                 } catch (e) {
-                    addLog('停止请求失败', 'error');
+                    addLog('停止请求失败: ' + e.message, 'error');
                 }
             };
 
             // 重启任务
             const restartTask = async (email) => {
                 if (!confirm('确定要重启任务吗？')) return;
+                addLog(`正在重启任务: ${email}...`, 'info');
                 try {
-                    addLog(`正在重启任务: ${email}...`, 'info');
                     const res = await fetch(`/api/verify/restart/${encodeURIComponent(email)}`, { method: 'POST' });
+                    // 检查 HTTP 状态码
+                    if (res.status === 401) {
+                        addLog('Session 过期，请刷新页面重新登录', 'error');
+                        setTimeout(() => window.location.reload(), 2000);
+                        return;
+                    }
                     const data = await res.json();
                     if (data.success) {
-                        addLog(`任务已重启: ${email}`, 'success');
+                        addLog(`✓ 任务已重启: ${email}`, 'success');
                         pollTaskStatus(email);
                     } else {
                         addLog(data.error || '重启失败', 'error');
                     }
                 } catch (e) {
-                    addLog('重启请求失败', 'error');
+                    addLog('重启请求失败: ' + e.message, 'error');
                 }
             };
 
@@ -940,6 +1450,79 @@ JWT Token: ${acc.jwt}`;
                     }
                 } catch (e) {
                     addLog('退出登录请求失败', 'error');
+                }
+            };
+
+            // 复制文本到剪贴板
+            const copyText = (text) => {
+                navigator.clipboard.writeText(text);
+                addLog('已复制到剪贴板', 'success');
+            };
+
+            // 显示应急登录模态框
+            const showEmergencyLogin = async (email) => {
+                emergencyModal.value.show = true;
+                emergencyModal.value.loading = true;
+                emergencyModal.value.email = email;
+                emergencyModal.value.password = '';
+                emergencyModal.value.jwt = '';
+                emergencyModal.value.profileData = null;
+                emergencyModal.value.continuing = false;
+
+                try {
+                    const res = await fetch(`/api/verify/emergency/${encodeURIComponent(email)}`);
+                    const data = await res.json();
+                    if (data.success) {
+                        emergencyModal.value.email = data.email;
+                        emergencyModal.value.password = data.password;
+                        emergencyModal.value.jwt = data.jwt || '';
+                        emergencyModal.value.profileData = data.profile_data || null;
+                        if (data.profile_data) {
+                            addLog(`注册信息: ${data.profile_data.first_name} ${data.profile_data.last_name}`, 'info');
+                        }
+                        addLog('登录信息已加载', 'info');
+                    } else {
+                        addLog(data.error || '获取信息失败', 'error');
+                        emergencyModal.value.show = false;
+                    }
+                } catch (e) {
+                    addLog('请求失败: ' + e.message, 'error');
+                    emergencyModal.value.show = false;
+                } finally {
+                    emergencyModal.value.loading = false;
+                }
+            };
+
+            // 手动登录后继续验证
+            const manualContinueVerify = async () => {
+                if (!emergencyModal.value.email) return;
+                emergencyModal.value.continuing = true;
+
+                try {
+                    const res = await fetch(`/api/verify/manual-continue/${encodeURIComponent(emergencyModal.value.email)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mode: 'cdp' })
+                    });
+                    // 检查 HTTP 状态码
+                    if (res.status === 401) {
+                        addLog('Session 过期，请刷新页面重新登录', 'error');
+                        setTimeout(() => window.location.reload(), 2000);
+                        return;
+                    }
+                    const data = await res.json();
+                    if (data.success) {
+                        addLog('✓ 验证任务已继续（跳过登录）', 'success');
+                        emergencyModal.value.show = false;
+                        // 重新开始轮询
+                        pollTaskStatus(emergencyModal.value.email);
+                    } else {
+                        addLog(data.error || '继续验证失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('请求失败: ' + e.message, 'error');
+                } finally {
+                    emergencyModal.value.continuing = false;
                 }
             };
 
@@ -1020,61 +1603,257 @@ JWT Token: ${acc.jwt}`;
             const startSingleVerify = async () => {
                 if (singleRunning.value) return;
 
-                // 脚本登录模式需要账号密码
-                if (singleVerifyMode.value === 'camoufox') {
-                    if (!singleChatgptEmail.value || !singleChatgptPassword.value) {
-                        addLog('请输入 ChatGPT 账号密码', 'error');
-                        return;
-                    }
-                }
-
                 // 确定临时邮箱
-                let email = '';
+                let tempEmail = '';
                 let jwt = '';
                 if (singleEmailSource.value === 'pool') {
                     if (!singleTempEmail.value) {
                         addLog('请从邮箱池选择临时邮箱', 'error');
                         return;
                     }
-                    email = singleTempEmail.value;
-                    const poolEmail = emailPool.value.find(e => e.address === email);
+                    tempEmail = singleTempEmail.value;
+                    const poolEmail = emailPool.value.find(e => e.address === tempEmail);
                     jwt = poolEmail?.jwt || '';
                 } else {
                     if (!singleManualEmail.value || !singleManualJwt.value) {
                         addLog('请输入临时邮箱地址和 JWT', 'error');
                         return;
                     }
-                    email = singleManualEmail.value;
+                    tempEmail = singleManualEmail.value;
                     jwt = singleManualJwt.value;
                 }
 
                 singleRunning.value = true;
-                const modeName = singleVerifyMode.value === 'cdp' ? 'CDP 接管' : '脚本登录';
-                addLog(`单账号验证启动 (${modeName})...`, 'info');
-                addLog(`临时邮箱: ${email}`, 'info');
 
-                if (singleVerifyMode.value === 'cdp') {
-                    addLog('确保已运行 start-chrome-devtools.bat 并登录 ChatGPT', 'info');
-                } else {
-                    addLog('注意: 脚本登录可能需要手动处理验证码', 'info');
-                }
+                // 获取代理设置
+                const proxyMode = singleProxyMode.value;
+                const fixedProxy = singleFixedProxy.value;
 
-                if (await startVerifyTask(email, singleVerifyMode.value, false)) {
-                    // 任务启动成功
-                } else {
-                    singleRunning.value = false;
+                if (singleVerifyMode.value === 'visual') {
+                    // 可视化调试模式（推荐）：Camoufox 有窗口，每次新指纹
+                    addLog(`🖥️ 可视化调试模式: ${tempEmail}`, 'info');
+                    addLog('Camoufox 有窗口启动中，每次自动生成新指纹...', 'info');
+                    if (await startVerifyTask(tempEmail, 'camoufox', false, proxyMode, fixedProxy)) {
+                        // 任务启动成功，headless=false 表示有窗口
+                    } else {
+                        singleRunning.value = false;
+                    }
+                } else if (singleVerifyMode.value === 'headless') {
+                    // 全自动后台模式：Camoufox 无头
+                    addLog(`🤖 全自动后台模式: ${tempEmail}`, 'info');
+                    addLog('Camoufox 无头模式运行中...', 'info');
+                    if (await startVerifyTask(tempEmail, 'camoufox', true, proxyMode, fixedProxy)) {
+                        // 任务启动成功，headless=true 表示无头
+                    } else {
+                        singleRunning.value = false;
+                    }
+                } else if (singleVerifyMode.value === 'cdp_manual') {
+                    // CDP 手动登录模式：先显示账号密码，让用户手动登录
+                    addLog(`🔑 CDP 手动登录模式: ${tempEmail}`, 'info');
+                    addLog('正在获取账号信息，请手动登录后点击继续...', 'warning');
+
+                    // 显示应急登录弹窗（包含账号密码）
+                    showEmergencyLogin(tempEmail);
+                    return;  // 等用户点击"我已登录，继续验证"后再启动任务
+                } else if (singleVerifyMode.value === 'cdp') {
+                    // CDP 全自动模式：连接已打开的 Chrome，脚本自动登录
+                    addLog(`🔌 CDP 全自动模式: ${tempEmail}`, 'info');
+                    addLog('⚠️ 注意：固定指纹，多次使用容易被风控', 'warning');
+                    addLog('连接已打开的 Chrome，脚本自动登录...', 'info');
+                    if (await startVerifyTask(tempEmail, 'cdp', false, 'none', '')) {
+                        // 任务启动成功，CDP 模式代理由浏览器管理
+                    } else {
+                        singleRunning.value = false;
+                    }
+                } else if (singleVerifyMode.value === 'own_account') {
+                    // 自有账号模式：需要输入账号密码 + 消耗临时邮箱
+                    if (!singleChatgptEmail.value || !singleChatgptPassword.value) {
+                        addLog('请输入自有账号邮箱和密码', 'error');
+                        singleRunning.value = false;
+                        return;
+                    }
+                    // 固定代理校验
+                    if (proxyMode === 'fixed' && !fixedProxy) {
+                        addLog('请输入固定代理地址', 'error');
+                        singleRunning.value = false;
+                        return;
+                    }
+                    addLog(`自有账号模式: ${singleChatgptEmail.value}`, 'info');
+                    addLog(`消耗临时邮箱: ${tempEmail}`, 'info');
+                    addLog('有窗口模式启动，验证码需手动输入...', 'info');
+
+                    // 自有账号模式：有窗口（headless=false），需要手动输入验证码
+                    try {
+                        const res = await fetch('/api/verify/start', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                email: singleChatgptEmail.value,
+                                password: singleChatgptPassword.value,
+                                temp_email: tempEmail,  // 用于接收 SheerID 链接
+                                temp_jwt: jwt,
+                                mode: 'camoufox',
+                                headless: false,  // 有窗口，方便输入验证码
+                                proxy_mode: proxyMode,
+                                fixed_proxy: fixedProxy
+                            })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            addLog('任务已启动，请在浏览器窗口中输入验证码', 'success');
+                            pollTaskStatus(singleChatgptEmail.value);
+                        } else {
+                            addLog(data.error || '启动失败', 'error');
+                            singleRunning.value = false;
+                        }
+                    } catch (e) {
+                        addLog('请求失败: ' + e.message, 'error');
+                        singleRunning.value = false;
+                    }
                 }
             };
 
             const getStatusClass = (s) => ({ pending: 'bg-gray-600', registering: 'bg-blue-600', verified: 'bg-green-600', failed: 'bg-red-600' }[s] || 'bg-gray-600');
+
+            // ========== 代理管理方法 ==========
+            const proxyInputMethod = ref('paste');  // paste | upload
+
+            const loadProxyStats = async () => {
+                try {
+                    const res = await fetch('/api/proxy/stats');
+                    const data = await res.json();
+                    if (data.success) {
+                        proxyStats.value = data;
+                    }
+                } catch (e) {
+                    console.error('加载代理统计失败', e);
+                }
+            };
+
+            const parseProxyText = async () => {
+                if (!proxyText.value) return;
+                proxyParsing.value = true;
+                try {
+                    const res = await fetch('/api/proxy/parse', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            text: proxyText.value,
+                            protocol: proxyProtocol.value
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        proxyParsedList.value = data.proxies || [];
+                        addLog(`解析成功: ${data.parsed} 个代理`, 'success');
+                        if (data.failed > 0) {
+                            addLog(`失败: ${data.failed} 个`, 'warning');
+                        }
+                    } else {
+                        addLog(data.error || '解析失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('请求失败', 'error');
+                } finally {
+                    proxyParsing.value = false;
+                }
+            };
+
+            const handleProxyFileChange = (event) => {
+                const file = event.target.files[0];
+                if (file) {
+                    proxyFile.value = file;
+                }
+            };
+
+            const uploadProxyFile = async () => {
+                if (!proxyFile.value) return;
+                proxyParsing.value = true;
+                try {
+                    const formData = new FormData();
+                    formData.append('file', proxyFile.value);
+                    formData.append('protocol', proxyProtocol.value);
+                    formData.append('save', 'true');  // 自动保存到代理池
+
+                    const res = await fetch('/api/proxy/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        proxyParsedList.value = data.proxies || [];
+                        addLog(`解析成功: ${data.parsed} 个代理`, 'success');
+
+                        // 显示保存结果
+                        if (data.added !== undefined) {
+                            if (data.added > 0) {
+                                addLog(`新增: ${data.added} 个代理`, 'success');
+                            }
+                            if (data.duplicates > 0) {
+                                addLog(`跳过重复: ${data.duplicates} 个`, 'info');
+                            }
+                            addLog(`保存到: ${data.file_path}`, 'info');
+                        }
+
+                        if (data.failed > 0) {
+                            addLog(`解析失败: ${data.failed} 个`, 'warning');
+                        }
+
+                        // 刷新代理池统计
+                        loadProxyStats();
+                    } else {
+                        addLog(data.error || '上传失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('请求失败', 'error');
+                } finally {
+                    proxyParsing.value = false;
+                }
+            };
+
+            // 保存粘贴的代理到代理池
+            const saveProxyList = async () => {
+                if (proxyParsedList.value.length === 0) return;
+
+                try {
+                    const res = await fetch('/api/proxy/parse', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            text: proxyParsedList.value.join('\n'),
+                            protocol: proxyProtocol.value,
+                            save: true  // 保存到代理池
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        if (data.added > 0) {
+                            addLog(`新增: ${data.added} 个代理`, 'success');
+                        }
+                        if (data.duplicates > 0) {
+                            addLog(`跳过重复: ${data.duplicates} 个`, 'info');
+                        }
+                        addLog(`保存到: ${data.file_path}`, 'info');
+
+                        // 刷新代理池统计
+                        loadProxyStats();
+                    } else {
+                        addLog(data.error || '保存失败', 'error');
+                    }
+                } catch (e) {
+                    addLog('保存请求失败', 'error');
+                }
+            };
 
             onMounted(() => {
                 fetchStatus();
                 fetchEmailPool();
                 fetchAccounts();
                 fetchRunningTasks();  // 检查是否有运行中的任务
+                loadProxyStats();  // 加载代理池统计
                 setInterval(fetchStatus, 10000);
                 setInterval(fetchEmailPool, 30000);
+                setInterval(loadProxyStats, 30000);  // 定期刷新代理统计
             });
 
             return {
@@ -1085,13 +1864,18 @@ JWT Token: ${acc.jwt}`;
                 // 单账号验证（合并后的变量）
                 singleVerifyMode, singleChatgptEmail, singleChatgptPassword,
                 singleEmailSource, singleTempEmail, singleManualEmail, singleManualJwt, singleRunning,
+                singleProxyMode, singleFixedProxy,  // 代理模式选择
                 accounts, statusFilter, selectedEmail, currentFormData, currentVerificationId, currentVeteranId, loading, logs,
                 availableEmails, visibleEmails, singleEmailConsumedWarning,  // 邮箱过滤和消耗检测
                 runningTask, stopTask, restartTask, restartService, logoutChatgpt,  // 任务和服务控制
                 detailModal, showAccountDetail, copyAccountInfo, formatTime,  // 账号详情模态框
-                fetchAccounts, createEmails, addExternalEmail, deleteEmail, reloadEmailPool,
+                emergencyModal, showEmergencyLogin, manualContinueVerify, copyText,  // 应急登录模态框
+                fetchAccounts, updateAccountTag, createEmails, addExternalEmail, deleteEmail, reloadEmailPool,
                 prepareVerify, reportResult, copyFormData, exportAccounts,
                 startFullAuto, startSingleVerify,  // 简化后的启动函数
+                // 代理管理
+                proxyStats, proxyInputMethod, proxyText, proxyProtocol, proxyFile, proxyParsedList, proxyParsing,
+                loadProxyStats, parseProxyText, handleProxyFileChange, uploadProxyFile, saveProxyList,
                 getStatusClass
             };
         }

@@ -263,21 +263,21 @@ def api_get_accounts():
     end = start + per_page
     paged_accounts = accounts[start:end]
 
-    # 从邮箱池补充密码（确保数据一致性）
+    # 从邮箱池补充密码和 JWT（仅当数据库字段为空时）
     try:
         pool = get_email_pool()
         for acc in paged_accounts:
             email_addr = acc.get('email', '')
             pool_email = pool.get_by_address(email_addr)
             if pool_email:
-                # 优先使用邮箱池的密码（创建时生成的真实密码）
+                # 只有数据库密码为空时，才用邮箱池补充
                 if pool_email.get('password') and not acc.get('password'):
                     acc['password'] = pool_email['password']
-                # 如果数据库密码为空，用邮箱池的
-                elif pool_email.get('password'):
-                    acc['password'] = pool_email['password']
+                # 补充 JWT
+                if pool_email.get('jwt') and not acc.get('jwt'):
+                    acc['jwt'] = pool_email['jwt']
     except Exception as e:
-        logger.warning(f"[Accounts] 从邮箱池补充密码失败: {e}")
+        logger.warning(f"[Accounts] 从邮箱池补充数据失败: {e}")
 
     stats = get_accounts_stats()
     total = stats.get('total', 0)
@@ -301,6 +301,17 @@ def api_get_account(email: str):
     account = get_account_by_email(email)
     if not account:
         return jsonify({'success': False, 'error': '账号不存在'}), 404
+
+    # 补充 JWT（密码以数据库为准，不用邮箱池覆盖）
+    try:
+        pool = get_email_pool()
+        pool_email = pool.get_by_address(email)
+        if pool_email:
+            # 只补充 JWT，不覆盖密码
+            if pool_email.get('jwt') and not account.get('jwt'):
+                account['jwt'] = pool_email['jwt']
+    except Exception as e:
+        logger.warning(f"[Account Detail] 从邮箱池补充 JWT 失败: {e}")
 
     # 获取该账号的验证记录
     verifications = get_verifications_by_account(account['id'])
@@ -615,6 +626,10 @@ def get_email_pool():
         migrated = _email_pool.migrate_add_passwords()
         if migrated > 0:
             logger.info(f"[App] 邮箱池迁移完成: 为 {migrated} 个邮箱生成密码")
+        # 迁移旧数据：为没有注册信息的邮箱生成信息
+        migrated_profiles = _email_pool.migrate_add_profiles()
+        if migrated_profiles > 0:
+            logger.info(f"[App] 邮箱池迁移完成: 为 {migrated_profiles} 个邮箱生成注册信息")
         # 同步数据库状态到邮箱池（修复验证成功后邮箱池没更新的问题）
         synced = _email_pool.sync_from_database()
         if synced > 0:
@@ -1097,7 +1112,7 @@ def api_start_verify():
                     _running_tasks[email]['logs'] = logs[-50:]  # 保留最后50条
 
         try:
-            if mode in ('cdp', 'cdp_manual'):
+            if mode in ('cdp', 'cdp_auto', 'cdp_manual'):
                 if mode == 'cdp_manual':
                     update_log("模式: CDP 手动登录 (你已登录，脚本自动验证)")
                 else:

@@ -74,7 +74,23 @@ def generate_discharge_date():
 
 
 def generate_password(length=16):
-    """生成随机密码"""
+    """
+    生成随机密码（符合 ChatGPT 要求）
+    - 至少 12 字符
+    - 包含大写字母
+    - 包含小写字母
+    - 包含数字
+    """
     import string
+    # 确保至少包含各类型字符
+    password = [
+        random.choice(string.ascii_uppercase),  # 至少1个大写
+        random.choice(string.ascii_lowercase),  # 至少1个小写
+        random.choice(string.digits),           # 至少1个数字
+    ]
+    # 填充剩余字符
     chars = string.ascii_letters + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
+    password += [random.choice(chars) for _ in range(length - 3)]
+    # 打乱顺序
+    random.shuffle(password)
+    return ''.join(password)

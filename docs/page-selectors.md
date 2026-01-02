@@ -1,6 +1,30 @@
 # Veterans Verify - 页面选择器文档
 
-> 使用 Chrome DevTools MCP 探索记录，2025-12-25
+> 使用 Chrome DevTools MCP 探索记录，最后更新：2026-01-02 02:20 UTC+8
+
+## MCP 测试账号记录（2026-01-02）
+
+| 邮箱 | 密码 | 姓名 | 生日 | 测试结果 |
+|------|------|------|------|---------|
+| mjjv26qxp@009025.xyz | L2J22aBH9QMh1Yh5 | Barbara Jones | 1991-10-05 | ✅ 完整登录流程验证通过 |
+
+### 完整流程记录（MCP 手动验证）
+
+```
+页面0: 欢迎回来弹窗 → button「登录至另一个帐户」
+页面1: 未登录首页 → button「登录」
+页面2: 登录弹窗 → textbox「电子邮件地址」→ 输入邮箱 → Enter
+页面3: 创建密码 → textbox「密码」→ button「继续」
+页面4: 验证码 → textbox「代码」→ button「继续」
+页面5: about-you → textbox「全名」+ spinbutton 年/月/日 → button「继续」
+页面6: 引导页1 → button「跳过」
+页面7: 引导页2 → button「继续」
+页面8: 已登录主页 → navigate to /veterans-claim
+页面9: veterans-claim → button「验证资格条件」
+页面10: SheerID 表单 → 填写军人数据
+```
+
+---
 
 ## 启动调试浏览器
 
@@ -14,19 +38,228 @@ E:\veterans-verify\scripts\start-chrome-devtools.bat
 
 ---
 
-## 流程概览
+## 流程概览（2026-01-01 MCP 验证更新）
 
+### CDP 全自动流程
 ```
-1. Veterans 优惠页面 → 点击"登录"
-2. 登录/注册页面 → 输入邮箱 → 点击"继续"
-3. 创建密码页面 → 输入密码 → 点击"继续"
-4. 邮箱验证页面 → 输入验证码 → 点击"继续"
-5. 确认年龄页面 → 输入姓名+生日 → 点击"继续"
-6. Veterans 页面(已登录) → 点击"验证资格条件"
-7. SheerID 验证表单 → 填写军人信息 → 提交
-8. SheerID 邮箱验证 → 点击验证链接
-9. 验证成功 → 获得1年Plus
+1. 退出当前登录（chatgpt.com 个人资料菜单 → 退出登录 → 确认）
+2. 点击"登录至另一个帐户" 或 "登录"按钮
+3. 弹窗输入邮箱 → 继续
+4. 验证码页面 → 从邮箱获取验证码 → 输入 → 继续
+   └── ⚠️ 重要：即使知道密码，OpenAI 仍强制要求验证码！
+5. （新用户）创建密码 → about-you 页面
+6. 登录成功 → 导航到 veterans-claim
+7. 点击"领取优惠" → SheerID 表单 或 Stripe 支付页面
+8. 填写表单 → 等待验证链接 → 点击链接 → 验证成功
 ```
+
+### ⚠️ 登录场景分类（2026-01-01 MCP 验证更新）
+
+| 场景 | 输入邮箱后跳转 | 后续流程 |
+|------|--------------|---------|
+| **已注册用户（同设备）** | `/log-in/password` | 输入密码 → 直接登录成功 ✅ |
+| **已注册用户（新设备）** | `/email-verification` | 验证码 → 输入密码 → 登录成功 |
+| **新用户** | `/email-verification` | 验证码 → 创建密码 → about-you → 登录成功 |
+
+**脚本处理逻辑**（按 URL 判断）：
+```python
+if "auth.openai.com" in url:
+    if "/log-in/password" in url:
+        # 已注册用户，同设备 → 直接输入密码
+        await fill_password(page, password)
+    elif "/email-verification" in url:
+        # 可能是新用户，也可能是已注册用户新设备
+        await fill_verification_code(page, email)
+        # 验证码后可能跳转到：
+        # - /create-account/password（新用户）
+        # - /log-in/password（已注册用户新设备）
+        # - chatgpt.com（直接登录成功）
+    elif "/create-account/password" in url:
+        # 新用户，创建密码
+        await fill_password(page, password)
+    elif "/about-you" in url:
+        # 新用户，填写年龄
+        await fill_about_you(page, email)
+```
+
+---
+
+## 页面0: 退出登录流程（2026-01-01 MCP 验证）
+
+### 步骤1: 点击个人资料菜单
+
+**URL**: `https://chatgpt.com/`（已登录状态）
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 个人资料菜单 | `button "打开"个人资料"菜单"` | 左下角 |
+
+### 步骤2: 菜单项
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 编辑个人资料 | `menuitem "编辑个人资料"` | |
+| 升级套餐 | `menuitem "升级套餐"` | |
+| 个性化 | `menuitem "个性化"` | |
+| 设置 | `menuitem "设置"` | |
+| 帮助 | `menuitem "帮助"` | 可展开 |
+| **退出登录** | `menuitem "退出登录"` | ✅ 目标 |
+
+### 步骤3: 确认退出弹窗
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 弹窗 | `dialog` | |
+| 标题 | `StaticText "你确定要退出登录吗？"` | |
+| 说明 | `StaticText "要以 xxx@xxx 的身份退出 ChatGPT？"` | 动态邮箱 |
+| **退出登录按钮** | `button "退出登录"` | ✅ 确认 |
+| 取消按钮 | `button "取消"` | |
+
+### 步骤4: 退出后弹窗（两种情况）
+
+**情况A: "欢迎回来"弹窗**
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 弹窗 | `dialog` | |
+| 标题 | `StaticText "欢迎回来"` | |
+| **登录按钮** | `button "登录"` | ✅ 开始登录 |
+| 免费注册 | `button "免费注册"` | |
+| 保持退出状态 | `link "保持退出状态"` | |
+
+**情况B: "Log back in"弹窗**（刚退出时可能出现）
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 弹窗 | `dialog` | |
+| 标题 | `heading "Log back in"` | |
+| 快速登录上个账号 | `button "个人资料图片 xxx xxx@xxx"` | |
+| **登录至另一个帐户** | `button "登录至另一个帐户"` | ✅ 换账号 |
+| 创建帐户 | `button "创建帐户"` | |
+
+### 代码示例
+
+```python
+async def logout_chatgpt(page):
+    """退出当前 ChatGPT 登录"""
+    # 1. 点击个人资料菜单
+    profile_menu = page.get_by_role("button", name="打开"个人资料"菜单")
+    await profile_menu.click()
+    await asyncio.sleep(0.5)
+
+    # 2. 点击退出登录
+    logout_btn = page.get_by_role("menuitem", name="退出登录")
+    await logout_btn.click()
+    await asyncio.sleep(0.5)
+
+    # 3. 确认退出
+    confirm_btn = page.get_by_role("button", name="退出登录")
+    await confirm_btn.click()
+    await page.wait_for_url("**/chatgpt.com/**", timeout=10000)
+
+    # 4. 处理退出后弹窗
+    login_btn = page.get_by_role("button", name="登录至另一个帐户")
+    if await login_btn.count() > 0:
+        await login_btn.click()
+    else:
+        login_btn = page.get_by_role("button", name="登录")
+        if await login_btn.count() > 0:
+            await login_btn.click()
+```
+
+---
+
+## 页面0.5: 登录弹窗（2026-01-01 MCP 验证）
+
+**URL**: `https://chatgpt.com/`（未登录状态，点击登录后）
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 弹窗 | `dialog` | |
+| 标题 | `heading "登录或注册"` | |
+| 关闭按钮 | `button "关闭"` | banner 内 |
+| Google 登录 | `button "继续使用 Google 登录"` | ⚠️ 别误点 |
+| Apple 登录 | `button "继续使用 Apple 登录"` | |
+| Microsoft 登录 | `button "继续使用 Microsoft 登录"` | |
+| 手机登录 | `button "继续使用手机登录"` | |
+| **邮箱输入框** | `textbox "电子邮件地址"` | ✅ 目标 |
+| **继续按钮** | `button "继续"` | ⚠️ 用 exact=True！ |
+
+### ⚠️ 继续按钮误点问题
+
+```python
+# ❌ 错误：会匹配到 "继续使用 Google 登录"
+continue_btn = dialog.get_by_role("button", name="继续")
+
+# ✅ 正确方式1：精确匹配
+continue_btn = dialog.get_by_role("button", name="继续", exact=True)
+
+# ✅ 正确方式2：按 Enter 键
+await email_input.press("Enter")
+
+# ✅ 正确方式3：CSS 选择器
+continue_btn = dialog.locator('button:text-is("继续")')
+```
+
+---
+
+## 页面0.6: 验证码页面（2026-01-01 MCP 验证）
+
+**URL**: `https://auth.openai.com/email-verification`
+
+**⚠️ 重要发现**：无论新用户还是已注册用户，输入邮箱后都会跳到验证码页面！
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 标题 | `heading "检查您的收件箱"` | |
+| 说明 | `StaticText "输入我们刚刚向 xxx 发送的验证码"` | |
+| **验证码输入框** | `textbox "代码"` | 6位验证码 |
+| **继续按钮** | `button "继续"` | |
+| 重新发送 | `button "重新发送电子邮件"` | |
+| 使用密码继续 | `link "使用密码继续"` | 跳到密码页 |
+
+### 已注册用户密码页面（⚠️ 2026-01-01 MCP 真实数据）
+
+**URL**: `https://auth.openai.com/log-in/password`
+
+**真实快照**：
+```
+RootWebArea "输入密码 - OpenAI" url="https://auth.openai.com/log-in/password"
+  link "ChatGPT" url="https://chatgpt.com/"
+    image "ChatGPT"
+  heading "输入密码" level="1"
+  form "输入密码"
+    StaticText "电子邮件地址"
+    textbox "电子邮件地址" description="只读。" readonly value="xxx@009025.xyz"
+    link "编辑电子邮件" url="https://auth.openai.com/log-in-or-create-account"
+      StaticText "编辑"
+    StaticText "密码"
+    textbox "密码" required                    ← 密码输入框
+    button "显示密码"
+    link "忘记了密码？" url="https://auth.openai.com/reset-password"
+    button "继续"                              ← 提交按钮
+    StaticText "或"
+    button "使用一次性验证码登录"              ← 切换到验证码登录
+```
+
+| 元素 | 选择器 | CSS 选择器 |
+|------|--------|-----------|
+| 标题 | `heading "输入密码"` | `h1` |
+| 邮箱（只读） | `textbox "电子邮件地址"` readonly | `input[readonly]` |
+| 编辑邮箱 | `link "编辑电子邮件"` | `a:has-text("编辑")` |
+| **密码输入框** | `textbox "密码"` | `input[type="password"]` |
+| 显示密码 | `button "显示密码"` | |
+| 忘记密码 | `link "忘记了密码？"` | |
+| **继续按钮** | `button "继续"` | `button[type="submit"]` |
+| 使用验证码 | `button "使用一次性验证码登录"` | |
+
+**页面标识**：
+- URL 包含 `/log-in/password`
+- 标题 "输入密码"
+
+**⚠️ 2026-01-01 测试结果**：
+- 同设备登录：输入密码后直接登录成功，**无需验证码**
+- 新设备登录：可能仍需验证码（OpenAI 安全策略）
 
 ---
 
@@ -86,24 +319,37 @@ E:\veterans-verify\scripts\start-chrome-devtools.bat
 3. **选择器不匹配**：CSS 选择器 `input[name="email"]` 可能找不到弹窗中的 textbox
    - 推荐用 Playwright 的 `get_by_role("textbox", name="电子邮件地址")`
 
-### 代码示例
+4. **⚠️ 继续按钮误点（2025-12-31 新发现！）**
+   - `get_by_role("button", name="继续")` 会匹配到"继续使用 Google 登录"
+   - **必须使用 `exact=True` 精确匹配！**
+   ```python
+   # ❌ 错误：会匹配到 "继续使用 Google 登录"
+   continue_btn = dialog.get_by_role("button", name="继续")
+
+   # ✅ 正确：精确匹配只匹配 "继续"
+   continue_btn = dialog.get_by_role("button", name="继续", exact=True)
+   ```
+
+### 代码示例（正确写法）
 
 ```python
 # 1. 在 chatgpt.com 主页点击登录按钮
-login_btn = page.get_by_role("button", name="登录")
+login_btn = page.get_by_role("button", name="登录", exact=True)
 await login_btn.click()
-await asyncio.sleep(1)
 
 # 2. 等待弹窗出现
+await page.wait_for_selector("dialog", timeout=5000)
 dialog = page.locator("dialog")
-await dialog.wait_for(state="visible", timeout=5000)
 
-# 3. 在弹窗内输入邮箱（关键！）
-email_input = dialog.get_by_role("textbox", name="电子邮件地址")
+# 3. 在弹窗内输入邮箱
+# 方式1: CSS 选择器（推荐）
+email_input = dialog.locator('input[type="text"], input[type="email"]')
+# 方式2: get_by_role
+# email_input = dialog.get_by_role("textbox", name="电子邮件地址")
 await email_input.fill("xxx@009025.xyz")
 
-# 4. 点击继续
-continue_btn = dialog.get_by_role("button", name="继续")
+# 4. 点击继续（⚠️ 必须用 exact=True！）
+continue_btn = dialog.get_by_role("button", name="继续", exact=True)
 await continue_btn.click()
 ```
 
@@ -170,21 +416,116 @@ await continue_btn.click()
 
 ---
 
-## 页面5: 确认年龄 (新页面!)
+## 页面5: 确认年龄 (about-you)
 
 **URL**: `https://auth.openai.com/about-you`
 
-| 元素 | CSS 选择器建议 | Playwright 选择器 |
-|------|---------------|------------------|
-| 全名输入框 | `input[name="name"]` | `textbox "全名"` |
-| 年份 | `input[type="number"]` | `spinbutton "年, 生日日期"` |
-| 月份 | `input[type="number"]` | `spinbutton "月, 生日日期"` |
-| 日期 | `input[type="number"]` | `spinbutton "日, 生日日期"` |
-| 继续按钮 | `button[type="submit"]` | `button "继续"` |
+| 元素 | CSS 选择器 | Playwright 选择器 | 说明 |
+|------|-----------|------------------|------|
+| 全名输入框 | - | `textbox "全名"` | 直接 fill() |
+| 年份 | `[role="spinbutton"]` | `spinbutton "年"` | ⚠️ 是 div 不是 input |
+| 月份 | `[role="spinbutton"]` | `spinbutton "月"` | ⚠️ 是 div 不是 input |
+| 日期 | `[role="spinbutton"]` | `spinbutton "日"` | ⚠️ 是 div 不是 input |
+| 继续按钮 | `button[type="submit"]` | `button "继续"` | |
 
 **页面标识**:
 - URL 包含 `about-you`
 - 标题 "确认一下你的年龄"
+
+### ⚠️ 2026-01-02 修复：spinbutton 真实 DOM 结构
+
+**问题**：spinbutton 不是 `<input type="number">`，而是 `<div role="spinbutton">`！
+
+**MCP 探测结果**：
+```json
+[
+  {"tagName":"DIV","role":"spinbutton","ariaLabel":"年, ","className":"_editableSegment_12ici_13"},
+  {"tagName":"DIV","role":"spinbutton","ariaLabel":"月, ","className":"_editableSegment_12ici_13"},
+  {"tagName":"DIV","role":"spinbutton","ariaLabel":"日, ","className":"_editableSegment_12ici_13"}
+]
+```
+
+**❌ 错误写法**（找不到元素）：
+```python
+# 这些选择器全部失效！
+document.querySelectorAll('input[type="number"]')  # 找不到
+document.querySelectorAll('[role="spinbutton"] input')  # 找不到
+```
+
+**✅ 正确写法**（MCP 测试验证）：
+```python
+# 使用 Playwright 的 get_by_role + fill 方法
+spinbutton = page.get_by_role("spinbutton", name="年")
+await spinbutton.fill("1974")  # ✅ 直接生效
+
+spinbutton = page.get_by_role("spinbutton", name="月")
+await spinbutton.fill("11")  # ✅ 直接生效
+
+spinbutton = page.get_by_role("spinbutton", name="日")
+await spinbutton.fill("19")  # ✅ 直接生效
+```
+
+**影响范围**：
+| 模式 | 是否涉及 about-you | 状态 |
+|------|-------------------|------|
+| CDP 手动登录 | ❌ 用户手动登录 | 不受影响 |
+| CDP 全自动 | ✅ 脚本自动登录 | 已修复 `run_verify.py:906` |
+| Camoufox 可视化 | ✅ 脚本自动登录 | ⚠️ 需同步修复 |
+| Camoufox 无头 | ✅ 脚本自动登录 | ⚠️ 需同步修复 |
+
+---
+
+## 页面5.5: 新用户引导页面（⚠️ 2026-01-01 新发现！）
+
+**URL**: `https://chatgpt.com/`（注册完成后首次进入）
+
+**重要**：新用户注册后会连续出现 2 个引导页面，必须处理！
+
+### 引导页1: "是什么促使你使用 ChatGPT？"
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 标题 | `heading "是什么促使你使用 ChatGPT？"` | |
+| 学校 | `button "学校"` | 选项之一 |
+| 工作 | `button "工作"` | 选项之一 |
+| 个人任务 | `button "个人任务"` | 选项之一 |
+| 乐趣和娱乐 | `button "乐趣和娱乐"` | 选项之一 |
+| 其他 | `button "其他"` | 选项之一 |
+| 下一步 | `button "下一步"` | 选择后点击 |
+| **跳过** | `button "跳过"` | ✅ **推荐点击这个** |
+
+### 引导页2: "你已准备就绪"
+
+| 元素 | 选择器 | 说明 |
+|------|--------|------|
+| 标题 | `StaticText "你已准备就绪"` | |
+| 说明 | `StaticText "ChatGPT 可能会犯错..."` | |
+| **继续** | `button "继续"` | ✅ **点击这个** |
+
+### 脚本处理逻辑
+
+```python
+# 在 detect_page_state 中添加检测
+if "chatgpt.com" in url and "veterans-claim" not in url:
+    text = await page.evaluate("() => document.body?.innerText || ''")
+    if "是什么促使你使用" in text or "What brings you" in text.lower():
+        return "onboarding_purpose", "New user onboarding - purpose selection"
+    if "你已准备就绪" in text or "You're all set" in text.lower():
+        return "onboarding_ready", "New user onboarding - ready page"
+
+# 在主循环中处理
+if state == "onboarding_purpose":
+    skip_btn = page.locator('button:text-is("跳过"), button:text-is("Skip")')
+    if await skip_btn.count() > 0:
+        await skip_btn.click()
+    continue
+
+if state == "onboarding_ready":
+    continue_btn = page.locator('button:text-is("继续"), button:text-is("Continue")')
+    if await continue_btn.count() > 0:
+        await continue_btn.click()
+    continue
+```
 
 ---
 

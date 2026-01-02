@@ -33,6 +33,10 @@ class EmailManager:
         self._session = requests.Session()
         self._session.trust_env = False  # 绕过系统代理
 
+        # 调试日志：打印配置信息（隐藏密码）
+        pwd_masked = '*' * min(len(admin_password), 8) if admin_password else '(空)'
+        logger.info(f"[EmailManager] 初始化: worker={worker_domain}, domain={email_domain}, pwd={pwd_masked}")
+
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         """统一请求方法（绕过代理）"""
         url = f"https://{self.worker_domain}{path}"
@@ -55,6 +59,8 @@ class EmailManager:
         try:
             name = username if username else self.generate_random_name()
 
+            logger.debug(f"[EmailManager] 创建邮箱请求: name={name}, domain={self.email_domain}")
+
             res = self._request('POST', '/admin/new_address', json={
                 "enablePrefix": True,
                 "name": name,
@@ -63,12 +69,25 @@ class EmailManager:
 
             if res.status_code == 200:
                 data = res.json()
-                return data.get('jwt'), data.get('address')
+                address = data.get('address')
+                logger.info(f"[EmailManager] ✓ 创建成功: {address}")
+                return data.get('jwt'), address
             else:
-                logger.error(f"创建邮箱失败: HTTP {res.status_code}")
+                # 增强错误日志：打印响应内容
+                try:
+                    error_body = res.text[:300]
+                except:
+                    error_body = "(无法读取响应)"
+                logger.error(f"[EmailManager] 创建邮箱失败: HTTP {res.status_code}")
+                logger.error(f"[EmailManager] 响应内容: {error_body}")
+                logger.error(f"[EmailManager] 请检查: 1) WORKER_DOMAINS 是否正确  2) ADMIN_PASSWORDS 是否匹配 Worker 密码")
                 return None, None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"[EmailManager] 连接失败: {e}")
+            logger.error(f"[EmailManager] 请检查: WORKER_DOMAINS={self.worker_domain} 是否可访问")
+            return None, None
         except Exception as e:
-            logger.error(f"创建邮箱出错: {e}")
+            logger.error(f"[EmailManager] 创建邮箱出错: {e}")
             return None, None
 
     def _get_recent_emails(self, email: str, limit: int = 10) -> List[dict]:
@@ -108,6 +127,33 @@ class EmailManager:
         content = content.replace('=2F', '/')
         return content
 
+    def _decode_subject(self, raw_content: str) -> str:
+        """解码 Subject 行（处理 Base64 和 Quoted-Printable 编码）"""
+        import base64
+        from email.header import decode_header
+
+        # 提取 Subject 行
+        subject_match = re.search(r'Subject:\s*(.+?)(?:\r?\n(?!\s)|\r?\n\r?\n)', raw_content, re.DOTALL)
+        if not subject_match:
+            return ""
+
+        subject_raw = subject_match.group(1).strip()
+        # 处理多行 Subject（折叠行以空格开头）
+        subject_raw = re.sub(r'\r?\n\s+', ' ', subject_raw)
+
+        try:
+            # 使用 email 库解码
+            decoded_parts = decode_header(subject_raw)
+            subject = ""
+            for part, encoding in decoded_parts:
+                if isinstance(part, bytes):
+                    subject += part.decode(encoding or 'utf-8', errors='ignore')
+                else:
+                    subject += part
+            return subject
+        except Exception:
+            return subject_raw
+
     def check_verification_code(self, email: str, max_retries: int = 20, interval: float = 3.0) -> Optional[str]:
         """
         检查验证码邮件（用于 ChatGPT/OpenAI 注册验证）
@@ -116,6 +162,9 @@ class EmailManager:
         - Subject: "你的 ChatGPT 代码为 XXXXXX" 或 "Your ChatGPT code is XXXXXX"
         - Body: 也可能包含验证码
         """
+        # 排除常见误识别的 6 位字符串
+        EXCLUDE_CODES = {'OPENAI', 'CHATGP', '009025', '000000'}
+
         for attempt in range(max_retries):
             try:
                 emails = self._get_recent_emails(email, limit=5)
@@ -130,25 +179,40 @@ class EmailManager:
                         logger.debug("忽略过期邮件")
                         continue
 
+                    # 检查发件人是否是 OpenAI/ChatGPT（排除 SheerID 邮件）
+                    from_match = re.search(r'From:.*?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', raw_content, re.IGNORECASE)
+                    if from_match:
+                        sender = from_match.group(1).lower()
+                        # 只处理 OpenAI 的邮件，跳过 SheerID 等其他邮件
+                        if 'sheerid' in sender or 'verify@' in sender:
+                            logger.debug(f"跳过非 OpenAI 邮件: {sender}")
+                            continue
+                        if 'openai' not in sender and 'chatgpt' not in sender:
+                            # 不是 OpenAI 的邮件，跳过
+                            logger.debug(f"跳过非 OpenAI 邮件: {sender}")
+                            continue
+
+                    # 【P0 修复】优先从解码后的 Subject 提取验证码
+                    subject = self._decode_subject(raw_content)
+                    if subject:
+                        # Subject 格式：你的 ChatGPT 代码为 625386
+                        subject_patterns = [
+                            r'代码为\s*([A-Z0-9]{6})',
+                            r'验证码[：:\s]*([A-Z0-9]{6})',
+                            r'code\s+is\s+([A-Z0-9]{6})',
+                            r'code[：:\s]+([A-Z0-9]{6})',
+                            r'\b(\d{6})\b',  # 纯数字验证码
+                        ]
+                        for pattern in subject_patterns:
+                            match = re.search(pattern, subject, re.IGNORECASE)
+                            if match:
+                                code = match.group(1).upper()
+                                if len(code) == 6 and code.isalnum() and code not in EXCLUDE_CODES:
+                                    logger.info(f"从 Subject 找到验证码: {code}")
+                                    return code
+
                     # 清理内容
                     cleaned_content = self._clean_email_content(raw_content)
-
-                    # 【P0 修复】优先从 Subject 提取验证码
-                    subject_patterns = [
-                        # 中文格式：你的 ChatGPT 代码为 XXXXXX
-                        r'Subject:.*?代码为\s*([A-Z0-9]{6})',
-                        r'Subject:.*?验证码[：:\s]*([A-Z0-9]{6})',
-                        # 英文格式：Your ChatGPT code is XXXXXX
-                        r'Subject:.*?code\s+is\s+([A-Z0-9]{6})',
-                        r'Subject:.*?code[：:\s]+([A-Z0-9]{6})',
-                    ]
-                    for pattern in subject_patterns:
-                        match = re.search(pattern, raw_content, re.IGNORECASE | re.DOTALL)
-                        if match:
-                            code = match.group(1).upper()
-                            if len(code) == 6 and code.isalnum():
-                                logger.info(f"从 Subject 找到验证码: {code}")
-                                return code
 
                     # OpenAI/ChatGPT 验证码提取模式（Body）
                     patterns = [
@@ -168,7 +232,7 @@ class EmailManager:
                         match = re.search(pattern, cleaned_content, re.IGNORECASE | re.DOTALL)
                         if match:
                             code = match.group(1).upper()
-                            if len(code) == 6 and code.isalnum():
+                            if len(code) == 6 and code.isalnum() and code not in EXCLUDE_CODES:
                                 logger.info(f"找到验证码: {code}")
                                 return code
 
@@ -176,10 +240,16 @@ class EmailManager:
                     lowered = cleaned_content.lower()
                     keywords = ["verification", "verify", "code", "openai", "chatgpt"]
                     if any(kw in lowered for kw in keywords):
-                        m = re.search(r'\b([A-Z0-9]{6})\b', cleaned_content, re.IGNORECASE)
-                        if m:
+                        # 优先匹配纯数字验证码
+                        for m in re.finditer(r'\b(\d{6})\b', cleaned_content):
+                            code = m.group(1)
+                            if code not in EXCLUDE_CODES:
+                                logger.info(f"找到验证码(兜底-数字): {code}")
+                                return code
+                        # 再匹配字母数字混合
+                        for m in re.finditer(r'\b([A-Z0-9]{6})\b', cleaned_content, re.IGNORECASE):
                             code = m.group(1).upper()
-                            if len(code) == 6 and code.isalnum():
+                            if code not in EXCLUDE_CODES:
                                 logger.info(f"找到验证码(兜底): {code}")
                                 return code
 

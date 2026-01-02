@@ -52,12 +52,6 @@ logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
 
-# 代理池（可选，留空则不使用代理）
-PROXY_POOL = [
-    # "http://user:pass@proxy1:port",
-    # "http://user:pass@proxy2:port",
-]
-
 # 验证间隔（秒）
 VERIFY_INTERVAL_MIN = 30
 VERIFY_INTERVAL_MAX = 90
@@ -115,6 +109,7 @@ class CamoufoxVerifier:
         require_account: bool = False  # 是否强制要求账号存在
     ):
         self.account_email = account_email
+        self.sheerid_email = account_email  # 默认 SheerID 表单用同一个邮箱
         self.account = get_account_by_email(account_email)
         if require_account and not self.account:
             raise ValueError(f"账号不存在: {account_email}")
@@ -134,15 +129,21 @@ class CamoufoxVerifier:
         self.consecutive_failures = 0
 
     async def init_browser(self):
-        """初始化 Camoufox 浏览器"""
+        """初始化 Camoufox 浏览器（支持 Profile 持久化）"""
         try:
             from camoufox.async_api import AsyncCamoufox
+            from profile_manager import get_or_create_profile
+
+            # 获取或创建 Profile 目录
+            profile_path = get_or_create_profile(self.account_email)
 
             config = {
                 "headless": self.headless,
                 "geoip": True,  # 使用美国 IP 指纹
                 "locale": "en-US",
                 "humanize": True,  # 启用人类行为模拟
+                "persistent_context": True,  # 🔥 启用持久化上下文
+                "user_data_dir": str(profile_path),  # 🔥 持久化 Profile
             }
 
             if self.proxy:
@@ -151,7 +152,7 @@ class CamoufoxVerifier:
             self.browser = await AsyncCamoufox(**config).__aenter__()
             self.page = await self.browser.new_page()
 
-            logger.info(f"Camoufox 初始化成功 (headless={self.headless}, proxy={self.proxy or 'none'})")
+            logger.info(f"Camoufox 初始化成功 (headless={self.headless}, proxy={self.proxy or 'none'}, profile={profile_path})")
             return True
         except ImportError:
             logger.error("Camoufox 未安装，请运行: pip install camoufox")
@@ -209,26 +210,259 @@ class CamoufoxVerifier:
             logger.error(f"输入失败 [{selector}]: {e}")
             return False
 
-    async def select_dropdown(self, selector: str, value: str) -> bool:
-        """选择下拉框"""
-        try:
-            element = await self.page.wait_for_selector(selector, timeout=5000)
-            if element:
-                await element.click()
-                await self.random_delay(0.3, 0.6)
+    async def select_combobox(self, label: str, value: str) -> bool:
+        """
+        选择下拉框（使用 get_by_role 更稳定）
 
-                # 点击选项
-                option = await self.page.wait_for_selector(
-                    f'[role="option"]:has-text("{value}")',
-                    timeout=3000
-                )
-                if option:
-                    await option.click()
-                    await self.random_delay(0.2, 0.4)
-                    return True
+        Args:
+            label: combobox 的 name 标签（如 "Branch of service"）
+            value: 要选择的选项值（精确匹配）
+        """
+        try:
+            # 点击 combobox 打开列表
+            combobox = self.page.get_by_role("combobox", name=label)
+            await combobox.click(timeout=5000)
+            await self.random_delay(0.3, 0.6)
+
+            # 选择选项（精确匹配）
+            option = self.page.get_by_role("option", name=value, exact=True)
+            await option.click(timeout=3000)
+            await self.random_delay(0.2, 0.4)
+            logger.debug(f"选择 {label}: {value}")
+            return True
         except Exception as e:
-            logger.error(f"下拉选择失败 [{selector}] -> {value}: {e}")
+            logger.error(f"下拉选择失败 [{label}] -> {value}: {e}")
         return False
+
+    # ==================== 登录/退出 ====================
+
+    async def logout_chatgpt(self) -> bool:
+        """退出当前 ChatGPT 账号"""
+        logger.info("正在退出 ChatGPT...")
+        try:
+            # 先导航到首页
+            await self.page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=15000)
+            await self.random_delay(2, 3)
+
+            # 方法1：点击用户菜单退出
+            try:
+                user_menu = await self.page.query_selector('[data-testid="profile-button"], button[aria-label*="profile"]')
+                if user_menu:
+                    await user_menu.click()
+                    await self.random_delay(0.5, 1)
+                    logout_btn = await self.page.query_selector('a:has-text("Log out"), button:has-text("Log out")')
+                    if logout_btn:
+                        await logout_btn.click()
+                        await self.random_delay(2, 4)
+                        logger.info("已点击退出按钮")
+                        return True
+            except:
+                pass
+
+            # 方法2：清除 cookies
+            try:
+                context = self.page.context
+                await context.clear_cookies()
+                await self.page.reload()
+                await self.random_delay(2, 3)
+                logger.info("已清除 Cookies")
+                return True
+            except:
+                pass
+
+            return False
+        except Exception as e:
+            logger.warning(f"退出登录失败: {e}")
+            return False
+
+    async def register_or_login(self, password: str) -> bool:
+        """
+        注册或登录 ChatGPT 账号
+
+        流程：
+        1. 打开 veterans-claim 页面
+        2. 点击登录
+        3. 输入邮箱
+        4. 创建/输入密码
+        5. 输入验证码（如需要）
+        6. 处理 about-you 页面（如需要）
+        """
+        logger.info(f"开始登录: {self.account_email}")
+
+        try:
+            # 1. 打开 veterans-claim
+            await self.page.goto(VETERANS_CLAIM_URL, wait_until="domcontentloaded", timeout=30000)
+            await self.random_delay(2, 4)
+            await self.screenshot("01_veterans_claim")
+
+            # 检查是否已登录
+            text = await self.page.evaluate("() => document.body?.innerText || ''")
+            if "验证资格条件" in text or "Verify your eligibility" in text.lower():
+                logger.info("已经登录，直接进入验证")
+                return True
+
+            # 2. 点击登录按钮
+            login_btn = await self.page.query_selector('button:has-text("登录"), button:has-text("Log in"), button:has-text("Sign in")')
+            if login_btn:
+                await login_btn.click()
+                await self.random_delay(2, 4)
+
+            # 3. 输入邮箱
+            email_input = await self.page.wait_for_selector('input[type="email"], input[name="email"]', timeout=15000)
+            if email_input:
+                await email_input.fill(self.account_email)
+                await self.random_delay(0.5, 1)
+
+                continue_btn = await self.page.query_selector('button:has-text("继续"), button:has-text("Continue")')
+                if continue_btn:
+                    await continue_btn.click()
+                    await self.random_delay(2, 4)
+
+            await self.screenshot("02_after_email")
+
+            # 4. 输入密码
+            page_text = await self.page.evaluate("() => document.body?.innerText || ''")
+            password_input = await self.page.query_selector('input[type="password"]')
+            if password_input:
+                if "创建密码" in page_text or "Create password" in page_text:
+                    logger.info("新用户，创建密码")
+                else:
+                    logger.info("已有用户，输入密码")
+
+                await password_input.fill(password)
+                await self.random_delay(0.5, 1)
+
+                continue_btn = await self.page.query_selector('button:has-text("继续"), button:has-text("Continue")')
+                if continue_btn:
+                    await continue_btn.click()
+                    await self.random_delay(3, 5)
+
+            await self.screenshot("03_after_password")
+
+            # 5. 检查验证码
+            page_text = await self.page.evaluate("() => document.body?.innerText || ''")
+            if "检查您的收件箱" in page_text or "Check your inbox" in page_text:
+                logger.info("需要邮箱验证码...")
+                code = await self._get_verification_code()
+                if code:
+                    logger.info(f"获取到验证码: {code}")
+                    # 优先使用 get_by_role（更稳定）
+                    code_input = self.page.get_by_role("textbox", name="代码")
+                    if await code_input.count() == 0:
+                        code_input = self.page.get_by_role("textbox", name="Code")
+                    if await code_input.count() == 0:
+                        code_input = await self.page.query_selector('input[name="code"], input[type="text"]')
+
+                    if code_input:
+                        if hasattr(code_input, 'fill'):
+                            await code_input.fill(code)
+                        else:
+                            await code_input.fill(code)
+                        await self.random_delay(0.5, 1)
+                        continue_btn = await self.page.query_selector('button:has-text("继续"), button:has-text("Continue")')
+                        if continue_btn:
+                            await continue_btn.click()
+                            await self.random_delay(3, 5)
+                else:
+                    logger.error("未能获取验证码")
+                    return False
+
+            # 6. 处理 about-you 页面
+            if "about-you" in self.page.url:
+                if not await self._handle_about_you():
+                    return False
+
+            await self.screenshot("04_login_complete")
+            logger.info("登录完成")
+            return True
+
+        except Exception as e:
+            logger.error(f"登录失败: {e}")
+            await self.screenshot("error_login")
+            return False
+
+    async def _get_verification_code(self, max_retries: int = 30) -> Optional[str]:
+        """从邮箱获取 ChatGPT 验证码"""
+        try:
+            email_manager = EmailManager(
+                worker_domain=WORKER_DOMAIN,
+                email_domain=EMAIL_DOMAIN,
+                admin_password=ADMIN_PASSWORD
+            )
+            return email_manager.check_verification_code(
+                email=self.account_email,
+                max_retries=max_retries,
+                interval=3.0
+            )
+        except Exception as e:
+            logger.error(f"获取验证码失败: {e}")
+            return None
+
+    async def _handle_about_you(self) -> bool:
+        """处理 about-you 确认年龄页面"""
+        logger.info("处理 about-you 页面...")
+        try:
+            import random
+            from datetime import datetime
+
+            # 生成随机生日（25-35岁，更符合退伍军人）
+            today = datetime.now()
+            age = random.randint(25, 35)
+            birth_year = str(today.year - age)
+            birth_month = str(random.randint(1, 12))
+            birth_day = str(random.randint(1, 28))
+
+            # 等待页面加载
+            await self.random_delay(1, 2)
+
+            # 填写全名（如果有）
+            name_input = self.page.get_by_role("textbox", name="全名")
+            if await name_input.count() > 0:
+                await name_input.fill("John Smith")
+                await self.random_delay(0.3, 0.5)
+
+            # 填写生日（spinbutton 类型）- 中英双语支持
+            async def fill_spinbutton(aria_labels: list, value: str, fallback_name: str):
+                """填写 spinbutton，支持中英双语"""
+                for aria_label in aria_labels:
+                    spinbutton = self.page.get_by_role("spinbutton", name=aria_label)
+                    if await spinbutton.count() > 0:
+                        await spinbutton.fill(value)
+                        logger.info(f"✓ 填写 spinbutton: {value} (name='{aria_label}')")
+                        return True
+                # 备用选择器
+                fallback = await self.page.query_selector(f'input[name="{fallback_name}"]')
+                if fallback:
+                    await fallback.fill(value)
+                    logger.info(f"✓ 填写备用 input: {value} (name='{fallback_name}')")
+                    return True
+                logger.warning(f"⚠️ 未找到 spinbutton，尝试过: {aria_labels}")
+                return False
+
+            # 年份（中英双语）
+            await fill_spinbutton(["年", "Year", "year"], birth_year, "year")
+            await self.random_delay(0.2, 0.4)
+
+            # 月份（中英双语）
+            await fill_spinbutton(["月", "Month", "month"], birth_month, "month")
+            await self.random_delay(0.2, 0.4)
+
+            # 日期（中英双语）
+            await fill_spinbutton(["日", "Day", "day"], birth_day, "day")
+
+            await self.random_delay(0.5, 1)
+
+            # 点击继续
+            continue_btn = await self.page.query_selector('button:has-text("Continue"), button:has-text("继续")')
+            if continue_btn:
+                await continue_btn.click()
+                await self.random_delay(2, 4)
+
+            logger.info("about-you 处理完成")
+            return True
+        except Exception as e:
+            logger.error(f"about-you 处理失败: {e}")
+            return False
 
     # ==================== 页面状态检测 ====================
 
@@ -308,63 +542,90 @@ class CamoufoxVerifier:
             self.current_veteran = None
 
     async def fill_sheerid_form(self) -> bool:
-        """填写 SheerID 表单"""
+        """
+        填写 SheerID 表单
+
+        重要：Status 必须第一个选择，否则其他字段会被清空！
+
+        表单结构（2025-12-27 验证）：
+        - Status: combobox (动态字段，有些页面有有些没有)
+        - Branch of service: combobox
+        - First/Last name: textbox
+        - Date of birth: combobox (month) + textbox (day/year)
+        - Discharge date: combobox (month) + textbox (day/year)
+        - Email: textbox
+        """
         if not self.current_veteran:
             return False
 
         try:
-            logger.info("开始填写表单...")
+            logger.info(f"开始填写表单: {self.current_veteran['first_name']} {self.current_veteran['last_name']} ({self.current_veteran['branch']})")
             await self.random_delay(1, 2)
 
-            # 1. Status - Military Veteran or Retiree
-            await self.select_dropdown(
-                '#sid-military-status',
-                'Military Veteran'
-            )
-            await self.random_delay(0.3, 0.6)
+            # 辅助函数：填写文本框
+            async def fill_textbox(label: str, value: str, nth: int = 0):
+                try:
+                    textbox = self.page.get_by_role("textbox", name=label).nth(nth)
+                    await textbox.fill(value, timeout=5000)
+                    await self.random_delay(0.1, 0.3)
+                    logger.debug(f"填写 {label}: {value}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"填写 {label} 失败: {e}")
+                    return False
 
-            # 2. Branch
-            await self.select_dropdown(
-                '#sid-branch-of-service',
-                self.current_veteran['branch']
-            )
-            await self.random_delay(0.3, 0.6)
+            # 1. Status (动态检测！有些页面有此字段，有些没有)
+            # 必须第一个选，否则其他字段会被清空
+            try:
+                status_combobox = self.page.get_by_role("combobox", name="Status")
+                if await status_combobox.count() > 0:
+                    logger.info("检测到 Status 字段，选择 'Military Veteran or Retiree'")
+                    await self.select_combobox("Status", "Military Veteran or Retiree")
+                    # 选择 Status 后可能会有 "Verifying your military status" 加载
+                    await self.random_delay(1.5, 2.5)
+                    # 等待表单重新出现
+                    try:
+                        await self.page.wait_for_selector('text=Branch of service', timeout=10000)
+                    except:
+                        pass
+                else:
+                    logger.info("没有 Status 字段，跳过")
+            except Exception as e:
+                logger.debug(f"Status 字段检测: {e} (跳过)")
+            await self.random_delay(0.3, 0.5)
 
-            # 3. Birth Month
-            await self.select_dropdown(
-                '#sid-birthdate__month',
-                self.current_veteran['birth_month']
-            )
-            await self.random_delay(0.3, 0.6)
+            # 2. Branch of service
+            await self.select_combobox("Branch of service", self.current_veteran['branch'])
+            await self.random_delay(0.3, 0.5)
 
-            # 4. Discharge Month
-            await self.select_dropdown(
-                '#sid-discharge-date__month',
-                self.discharge_date['month']
-            )
-            await self.random_delay(0.3, 0.6)
+            # 3. First name & Last name
+            await fill_textbox("First name", self.current_veteran['first_name'])
+            await fill_textbox("Last name", self.current_veteran['last_name'])
 
-            # 5. 填写文本字段
-            await self.human_type('#sid-first-name', self.current_veteran['first_name'])
+            # 4. Date of birth (month combobox + day/year textbox)
+            await self.select_combobox("Date of birth", self.current_veteran['birth_month'])
             await self.random_delay(0.2, 0.4)
 
-            await self.human_type('#sid-last-name', self.current_veteran['last_name'])
+            # Day 和 Year 有两组，第一组是 Date of birth，第二组是 Discharge date
+            day_boxes = self.page.get_by_role("textbox", name="Day")
+            year_boxes = self.page.get_by_role("textbox", name="Year")
+
+            await day_boxes.nth(0).fill(self.current_veteran['birth_day'], timeout=5000)
+            await self.random_delay(0.1, 0.2)
+            await year_boxes.nth(0).fill(self.current_veteran['birth_year'], timeout=5000)
             await self.random_delay(0.2, 0.4)
 
-            await self.human_type('#sid-birthdate-day', self.current_veteran['birth_day'])
+            # 5. Discharge date (month combobox + day/year textbox)
+            await self.select_combobox("Discharge date", self.discharge_date['month'])
             await self.random_delay(0.2, 0.4)
 
-            await self.human_type('#sid-birthdate-year', self.current_veteran['birth_year'])
+            await day_boxes.nth(1).fill(self.discharge_date['day'], timeout=5000)
+            await self.random_delay(0.1, 0.2)
+            await year_boxes.nth(1).fill(self.discharge_date['year'], timeout=5000)
             await self.random_delay(0.2, 0.4)
 
-            await self.human_type('#sid-discharge-date-day', self.discharge_date['day'])
-            await self.random_delay(0.2, 0.4)
-
-            await self.human_type('#sid-discharge-date-year', self.discharge_date['year'])
-            await self.random_delay(0.2, 0.4)
-
-            await self.human_type('#sid-email', self.account_email)
-            await self.random_delay(0.5, 1)
+            # 6. Email
+            await fill_textbox("Email address", self.sheerid_email)
 
             await self.screenshot("form_filled")
             logger.info("表单填写完成")
@@ -372,6 +633,8 @@ class CamoufoxVerifier:
 
         except Exception as e:
             logger.error(f"表单填写失败: {e}")
+            import traceback
+            traceback.print_exc()
             await self.screenshot("form_error")
             return False
 
@@ -443,7 +706,8 @@ class CamoufoxVerifier:
         Returns:
             是否成功点击
         """
-        logger.info(f"开始检查验证链接: {self.account_email}")
+        # SheerID 验证链接发到 sheerid_email（可能是临时邮箱）
+        logger.info(f"开始检查验证链接: {self.sheerid_email}")
 
         try:
             email_manager = EmailManager(
@@ -454,7 +718,7 @@ class CamoufoxVerifier:
 
             # 查找验证链接（每 3 秒检查一次）
             link = email_manager.check_verification_link(
-                email=self.account_email,
+                email=self.sheerid_email,
                 max_retries=max_retries,
                 interval=3.0
             )
@@ -493,23 +757,53 @@ class CamoufoxVerifier:
 
     # ==================== 主循环 ====================
 
-    async def run_verify_loop(self) -> bool:
+    async def run_verify_loop(self, password: str = None, auto_login: bool = True, sheerid_email: str = None) -> bool:
         """
         运行验证循环
+
+        Args:
+            password: 账号密码（auto_login=True 时必须）
+            auto_login: 是否自动登录（False = 假设已登录）
+            sheerid_email: SheerID 表单用的邮箱（自有账号模式时用临时邮箱）
 
         Returns:
             是否验证成功
         """
+        # 设置 SheerID 表单用的邮箱
+        if sheerid_email:
+            self.sheerid_email = sheerid_email
+            logger.info(f"SheerID 表单邮箱: {sheerid_email}")
+
         logger.info(f"开始验证循环: {self.account_email}")
+        logger.info(f"模式: {'自动登录' if auto_login else '已登录'}")
 
         # 初始化浏览器
         if not await self.init_browser():
             return False
 
         try:
-            # 打开 veterans-claim 页面
-            await self.page.goto(VETERANS_CLAIM_URL)
-            await self.random_delay(2, 4)
+            # 自动登录模式：先退出旧账号，再登录新账号
+            if auto_login:
+                if not password:
+                    # 尝试从数据库获取密码
+                    if self.account and self.account.get('password'):
+                        password = self.account['password']
+                    else:
+                        logger.error("需要密码但未提供")
+                        return False
+
+                # 退出旧账号
+                await self.logout_chatgpt()
+
+                # 登录新账号
+                if not await self.register_or_login(password):
+                    logger.error("登录失败")
+                    return False
+            else:
+                # 假设已登录，直接打开 veterans-claim
+                await self.page.goto(VETERANS_CLAIM_URL)
+                await self.random_delay(2, 4)
+
             await self.screenshot("start")
 
             while self.attempt_count < MAX_ATTEMPTS:
@@ -604,14 +898,15 @@ class CamoufoxVerifier:
 # ==================== 入口 ====================
 
 async def main(email: str):
-    """主函数"""
-    # 选择代理
-    proxy = random.choice(PROXY_POOL) if PROXY_POOL else None
+    """
+    主函数（仅用于测试）
 
+    生产环境请使用 app.py，其中集成了代理池管理
+    """
     verifier = CamoufoxVerifier(
         account_email=email,
         headless=False,  # 调试时设为 False
-        proxy=proxy,
+        proxy=None,  # 测试时不使用代理，生产环境由 app.py 管理
         screenshot_dir="screenshots"
     )
 
