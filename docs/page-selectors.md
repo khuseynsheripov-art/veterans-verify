@@ -1,12 +1,88 @@
 # Veterans Verify - 页面选择器文档
 
-> 使用 Chrome DevTools MCP 探索记录，最后更新：2026-01-02 02:20 UTC+8
+> 使用 Chrome DevTools MCP 探索记录，最后更新：2026-01-02 12:10 UTC+8
 
 ## MCP 测试账号记录（2026-01-02）
 
 | 邮箱 | 密码 | 姓名 | 生日 | 测试结果 |
 |------|------|------|------|---------|
+| gltn24sgu@009025.xyz | (邮箱池) | Thomas Thomas | 1984-08-27 | ✅ 全新注册流程测试（发现二次登录 bug 并修复） |
 | mjjv26qxp@009025.xyz | L2J22aBH9QMh1Yh5 | Barbara Jones | 1991-10-05 | ✅ 完整登录流程验证通过 |
+
+### 2026-01-02 12:00 全新注册流程测试（gltn24sgu）
+
+**流程记录：**
+```
+1. [11:59:35] 清除 36 个 ChatGPT cookies
+2. [11:59:42] 输入邮箱 → 弹窗
+3. [11:59:50] 创建密码页面
+4. [11:59:57] 验证码: 647616 ✅
+5. [12:00:01] about-you: Thomas Thomas, 1984/8/27
+6. [12:00:06] about-you 完成
+7. [12:00:12] 新用户引导页（用途选择）→ 跳转 veterans-claim
+8. [12:00:15] veterans-claim 页面
+9. [12:00:17] ❌ 检测当前登录账号失败 → 导航到设置页面（打开设置弹窗）
+10. [12:00:17] ❌ 清除 cookies → 二次登录开始
+11. [12:00:30] 验证码: 112462 ✅（第二个验证码）
+12. [12:00:36] 新用户欢迎弹窗（入门技巧）
+```
+
+**发现的问题：**
+1. `get_logged_in_account()` 方法3 会导航到 `#settings/Account`，打开设置弹窗
+2. 检测账号失败后，脚本会清除 Cookies 重新登录
+
+**修复内容：**
+1. 移除 `get_logged_in_account()` 方法3（导航到设置页面）
+2. veterans-claim 页面检测账号失败时，信任当前登录状态而不是退出重登
+
+---
+
+### ⚠️ 新发现：设置弹窗（2026-01-02）
+
+**URL**: `https://chatgpt.com/#settings/Account`
+
+**触发方式**：导航到 `#settings/Account` 或点击设置菜单
+
+**页面结构**：
+```
+dialog
+  ├─ button "×" (关闭)
+  ├─ 左侧菜单
+  │   ├─ menuitem "常规"
+  │   ├─ menuitem "通知"
+  │   ├─ menuitem "个性化"
+  │   ├─ menuitem "应用"
+  │   ├─ menuitem "订单"
+  │   ├─ menuitem "数据管理"
+  │   ├─ menuitem "安全"
+  │   ├─ menuitem "家长控制"
+  │   └─ menuitem "帐户" (选中)
+  └─ 右侧内容
+      ├─ "免费试用 ChatGPT Plus" + button "开始试用"
+      ├─ 功能列表...
+      ├─ "付款" + button "管理"
+      └─ "删除帐户" + button "删除"
+```
+
+**⚠️ 脚本禁止导航到此页面**：会打开弹窗干扰流程！
+
+---
+
+### about-you spinbutton 选择器（2026-01-02 验证）
+
+**中文环境 aria-label**：
+- 年: `spinbutton "年, 生日日期"`
+- 月: `spinbutton "月, 生日日期"`
+- 日: `spinbutton "日, 生日日期"`
+
+**代码使用**：
+```python
+await page.get_by_role("spinbutton", name="年, 生日日期").fill("1984")
+await page.get_by_role("spinbutton", name="月, 生日日期").fill("8")
+await page.get_by_role("spinbutton", name="日, 生日日期").fill("27")
+```
+
+---
 
 ### 完整流程记录（MCP 手动验证）
 

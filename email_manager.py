@@ -105,18 +105,27 @@ class EmailManager:
             logger.error(f"获取邮件列表失败: {e}")
             return []
 
-    def _is_recent_email(self, raw_content: str, max_age_minutes: int = 30) -> bool:
-        """检查邮件是否是最近的"""
+    def _is_recent_email(self, raw_content: str, max_age_minutes: int = 5) -> bool:
+        """检查邮件是否是最近的（默认 5 分钟内）"""
         try:
-            received_match = re.search(r'Received:.*?;\s*(.*?)\r\n', raw_content, re.DOTALL)
+            # 尝试多种日期格式
+            received_match = re.search(r'Received:.*?;\s*(.*?)\r?\n', raw_content, re.DOTALL)
             if received_match:
                 date_str = received_match.group(1).strip()
                 email_time = parsedate_to_datetime(date_str)
                 current_time = datetime.now(timezone.utc)
-                return (current_time - email_time) <= timedelta(minutes=max_age_minutes)
+                age = current_time - email_time
+                age_minutes = age.total_seconds() / 60
+
+                is_recent = age_minutes <= max_age_minutes
+                if not is_recent:
+                    logger.debug(f"邮件太旧: {age_minutes:.1f} 分钟前 (限制 {max_age_minutes} 分钟)")
+                return is_recent
+            else:
+                logger.warning("未找到 Received 头，无法判断邮件时间")
         except Exception as e:
             logger.warning(f"解析邮件时间失败: {e}")
-        return True  # 如果无法解析时间，默认为最近的
+        return False  # 如果无法解析时间，默认为旧邮件（安全策略）
 
     def _clean_email_content(self, raw_content: str) -> str:
         """清理邮件内容（处理 quoted-printable 编码等）"""
@@ -132,10 +141,13 @@ class EmailManager:
         import base64
         from email.header import decode_header
 
-        # 提取 Subject 行
-        subject_match = re.search(r'Subject:\s*(.+?)(?:\r?\n(?!\s)|\r?\n\r?\n)', raw_content, re.DOTALL)
+        # 提取 Subject 行（必须在行首，避免匹配 ARC 签名中的 Subject）
+        subject_match = re.search(r'^Subject:\s*(.+?)(?:\r?\n(?!\s)|\r?\n\r?\n)', raw_content, re.MULTILINE | re.DOTALL)
         if not subject_match:
-            return ""
+            # 备用：尝试不那么严格的匹配
+            subject_match = re.search(r'\nSubject:\s*(.+?)(?:\r?\n(?!\s)|\r?\n\r?\n)', raw_content, re.DOTALL)
+            if not subject_match:
+                return ""
 
         subject_raw = subject_match.group(1).strip()
         # 处理多行 Subject（折叠行以空格开头）

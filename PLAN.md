@@ -2,7 +2,107 @@
 
 > 整体方向、数据标准、流程说明、更新日志
 
-**最后更新**: 2025-12-30 21:30 UTC+8
+**最后更新**: 2026-01-02 09:25 UTC+8
+
+---
+
+## 更新日志
+
+### 2026-01-02 09:25 完善账号密码逻辑，支持多密码检测和尝试
+
+**问题发现**：
+- 邮箱池和数据库中的密码不一致（10/12 个账号）
+- 前期测试时数据保存逻辑不统一
+- `get_account_password()` 只返回单个密码，登录失败时无法尝试备选密码
+
+**完善内容**：
+
+1. **新增函数** `get_password_candidates()` (run_verify.py:788-858)：
+   - 返回所有可能的密码候选列表
+   - 检测邮箱池和数据库密码是否一致
+   - 不一致时记录警告日志
+   - 格式：`[{"password": "xxx", "source": "邮箱池", "priority": 1}, ...]`
+
+2. **保留函数** `get_account_password()` (run_verify.py:861-869)：
+   - 向后兼容，返回优先级最高的密码
+   - 内部调用 `get_password_candidates()`
+
+3. **修改 CDP 全自动登录逻辑** (run_verify.py:2061-2083)：
+   - 获取所有密码候选
+   - 依次尝试每个密码
+   - 记录成功的密码来源
+   - 失败时自动尝试下一个密码
+
+4. **新增账号验证脚本** `scripts/verify_account_passwords.py`：
+   - `--check-only`: 检查密码一致性（推荐，快速安全）
+   - `--verify-login`: 实际登录验证（慢，有风控风险）
+   - 生成详细报告：`data/password_check_results.json`
+
+**验证结果**（12 个账号）：
+```
+✓ 密码一致:         0 个
+⚠️ 密码不一致:       10 个
+ℹ️ 仅邮箱池有密码:   2 个
+```
+
+**⚠️ 重要更正**：
+- 旧账号：数据库密码才是 ChatGPT 真实密码 ✅
+- 邮箱池密码：后来批量生成的，不是真实密码 ❌
+- 所以优先级：**数据库 > 邮箱池**（已修正）
+
+**最佳实践（最终版）**：
+
+1. **密码轮换策略** - 数据库优先 > 邮箱池其次
+2. **自动同步机制** - 登录成功后同步正确密码到两边
+3. **验证脚本** - 实际登录验证并自动更新
+4. **新账号策略** - 邮箱池生成密码，同步保存
+
+**后续步骤**：
+1. ✅ 代码已完善（密码轮换 + 自动同步）
+2. ⏳ 测试 CDP 全自动模式
+3. ⏳ 运行验证脚本修复旧账号
+
+---
+
+### 2026-01-02 08:50 logout_chatgpt 简化为 Cookie 清除（v2）
+
+**问题**：
+- 原 120 行代码找菜单、点按钮、处理弹窗，太脆弱
+- 第一版 `clear_cookies()` 清除所有域名，包括 Flask Session 导致日志断开
+
+**修复** (run_verify.py:711-783)：
+```python
+# 只清除 chatgpt/openai 相关 cookies，保留其他域名
+all_cookies = await context.cookies()
+cookies_to_keep = [c for c in all_cookies
+    if 'chatgpt.com' not in c['domain']
+    and 'openai.com' not in c['domain']]
+await context.clear_cookies()
+await context.add_cookies(cookies_to_keep)
+```
+
+**测试结果**：
+- ✅ 清除 32 个 ChatGPT cookies，保留 1 个 Flask Session
+- ✅ 日志持续输出，WebSocket 没断开
+- ✅ 退出登录成功，自动登录流程正常
+
+### 2026-01-02 08:25 修复 logout_chatgpt 退出失败问题
+
+**问题**：
+- `logout_chatgpt()` 反复输出 "未找到个人资料菜单，可能未登录"
+- 但实际账号是登录状态
+- 脚本没有正确退出上一个账号，导致切换账号失败
+
+**根因**：
+- 脚本在 veterans-claim 页面执行退出操作
+- 但 veterans-claim 是简化页面，**没有侧边栏和个人资料菜单**
+- 只有 chatgpt.com 主页才有完整的侧边栏
+
+**修复** (run_verify.py:759-798)：
+1. 导航到 `chatgpt.com/` 后验证 URL 不是 veterans-claim
+2. 如果被重定向到 veterans-claim，重试导航（最多3次）
+3. 增加等待时间确保页面完全加载（2秒）
+4. 个人资料菜单查找增加重试逻辑（3次，每次等待2秒）
 
 ---
 
